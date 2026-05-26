@@ -261,7 +261,7 @@
       clientInfo: {
         name: "zotero_codex_chat",
         title: "Zotero Codex Chat",
-        version: "0.2.13",
+        version: "0.1.0",
       },
       capabilities: {
         experimentalApi: true,
