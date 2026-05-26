@@ -17,7 +17,7 @@ Zotero Codex Chat is a Zotero 9 plugin that embeds a Codex-powered chat panel in
 - Zotero 9.x.
 - Codex CLI with `app-server` support.
 - Node.js available to Zotero for the local WebSocket bridge.
-- Optional but recommended: `zotero-mcp-plugin`, if you want Codex to search/read your Zotero library through MCP tools.
+- Optional but recommended: [`zotero-mcp`](https://github.com/cookjohn/zotero-mcp), if you want Codex to search/read your Zotero library through MCP tools.
 
 ## Install
 
@@ -91,7 +91,7 @@ pref("extensions.zotero.zotero-codex-chat.codex.binaryPath", "/absolute/path/to/
 
 ## Zotero MCP Config
 
-If you use `zotero-mcp-plugin`, add this to `~/.codex/config.toml`:
+This plugin can reuse the MCP server provided by [`cookjohn/zotero-mcp`](https://github.com/cookjohn/zotero-mcp). If you use it, add this to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.zotero]
