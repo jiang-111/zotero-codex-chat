@@ -1,5 +1,7 @@
 # Zotero Codex Chat
 
+[中文文档](README.zh-CN.md)
+
 Zotero Codex Chat is a Zotero 9 plugin that embeds a Codex-powered chat panel inside Zotero. It is designed for paper reading, note drafting, and lightweight literature workflows without leaving the Zotero UI.
 
 ## Features
