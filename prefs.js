@@ -1,5 +1,5 @@
-pref("extensions.zotero.zotero-codex-chat.codex.binaryPath", "/home/jiangyi/.local/bin/codex-zotero");
-pref("extensions.zotero.zotero-codex-chat.codex.nodeBinaryPath", "/home/jiangyi/.nvm/versions/node/v22.22.3/bin/node");
+pref("extensions.zotero.zotero-codex-chat.codex.binaryPath", "");
+pref("extensions.zotero.zotero-codex-chat.codex.nodeBinaryPath", "");
 pref("extensions.zotero.zotero-codex-chat.codex.appServerPort", 45123);
 pref("extensions.zotero.zotero-codex-chat.codex.bridgePort", 45133);
 pref("extensions.zotero.zotero-codex-chat.codex.model", "");

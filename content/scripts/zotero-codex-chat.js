@@ -106,15 +106,15 @@
     const configured = String(getPref("codex.nodeBinaryPath", "") || "").trim();
     if (configured) return configured;
     const common = [
-      "/home/jiangyi/.nvm/versions/node/v22.22.3/bin/node",
-      "/home/jiangyi/.nvm/versions/node/v22.22.3/bin/nodejs",
       "/usr/bin/node",
       "/usr/local/bin/node",
+      "/opt/homebrew/bin/node",
+      "/snap/bin/node",
     ];
     for (const p of common) {
       if (pathExists(p)) return p;
     }
-    return "/home/jiangyi/.nvm/versions/node/v22.22.3/bin/node";
+    return "/usr/bin/node";
   }
 
   function writeTextFile(path, content, mode) {
@@ -736,7 +736,7 @@
 
     getSettings() {
       return {
-        binaryPath: String(getPref("codex.binaryPath", "/home/jiangyi/.local/bin/codex-zotero") || ""),
+        binaryPath: String(getPref("codex.binaryPath", "") || ""),
         nodeBinaryPath: defaultNodeBinary(),
         appServerPort: Number(getPref("codex.appServerPort", 45123) || 45123),
         bridgePort: Number(getPref("codex.bridgePort", 45133) || 45133),
