@@ -1,0 +1,29 @@
+<linkset>
+  <html:link rel="localization" href="zotero-codex-chat-preferences.ftl" />
+</linkset>
+
+<prefpane id="zotero-codex-chat-preferences">
+  <preferences>
+    <preference id="extensions.zotero.zotero-codex-chat.codex.binaryPath" name="extensions.zotero.zotero-codex-chat.codex.binaryPath" type="string" />
+    <preference id="extensions.zotero.zotero-codex-chat.codex.appServerPort" name="extensions.zotero.zotero-codex-chat.codex.appServerPort" type="int" />
+    <preference id="extensions.zotero.zotero-codex-chat.mcp.port" name="extensions.zotero.zotero-codex-chat.mcp.port" type="int" />
+  </preferences>
+
+  <html:style>
+    .zcc-pref { padding: 20px 24px; max-width: 760px; }
+    .zcc-pref h2 { margin: 0 0 8px; font-size: 17px; }
+    .zcc-pref p { margin: 0 0 12px; color: #666; line-height: 1.5; }
+    .zcc-pref code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+  </html:style>
+
+  <html:div class="zcc-pref">
+    <html:h2>Codex Chat</html:h2>
+    <html:p>
+      Open the chat UI from <html:strong>Tools → Open Codex Chat</html:strong>. The chat window contains the editable settings and the Codex MCP config snippet.
+    </html:p>
+    <html:p>
+      Default Codex binary path: <html:code>/home/jiangyi/.local/bin/codex-zotero</html:code>.
+      Default Zotero MCP endpoint: <html:code>http://127.0.0.1:23120/mcp</html:code>.
+    </html:p>
+  </html:div>
+</prefpane>

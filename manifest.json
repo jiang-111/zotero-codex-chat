@@ -1,0 +1,19 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero Codex Chat",
+  "version": "0.2.13",
+  "description": "Prevent Zotero freezes by requiring confirmation before MCP calls.",
+  "author": "jinyue jiang",
+  "icons": {
+    "48": "content/icons/icon48.png",
+    "96": "content/icons/icon96.png"
+  },
+  "applications": {
+    "zotero": {
+      "id": "zotero-codex-chat@autoagent.my",
+      "update_url": "https://example.invalid/zotero-codex-chat/update.json",
+      "strict_min_version": "6.999",
+      "strict_max_version": "9.*"
+    }
+  }
+}

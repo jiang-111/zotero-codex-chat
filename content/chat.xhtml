@@ -1,0 +1,135 @@
+<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <title>Zotero Codex Chat</title>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="chrome://zotero-codex-chat/content/chat.css" />
+  <script src="chrome://zotero-codex-chat/content/scripts/chat-window.js"></script>
+</head>
+<body>
+  <div id="app" class="sidebar-app">
+    <header class="topbar compact">
+      <div>
+        <h1>Codex</h1>
+      </div>
+      <div class="status-row">
+        <span id="mcpStatus" class="pill muted">MCP</span>
+        <span id="codexStatus" class="pill muted">Codex</span>
+      </div>
+    </header>
+
+    <section class="quick-actions" aria-label="Quick actions">
+      <button id="quickSummarizeBtn" title="Read the selected item through Zotero MCP and summarize it">总结当前文献</button>
+      <button id="quickSearchBtn" title="Search the Zotero library based on the current context">搜索全库相关文献</button>
+      <button id="quickNoteBtn" title="Draft a Chinese reading note without writing to Zotero">生成阅读笔记</button>
+      <button id="quickAnnotationsBtn" title="Read and summarize annotations for the selected item">总结批注</button>
+      <button id="writeNoteBtn" class="safe-write" title="Write the latest Codex answer into the selected Zotero item as a child note after confirmation">写入 Zotero Note</button>
+    </section>
+
+    <main id="messages" class="messages" aria-live="polite"></main>
+
+    <section class="tool-activity">
+      <details id="toolActivityDetails">
+        <summary id="toolSummary">工具调用：0</summary>
+        <div class="tool-header">
+          <span>Codex 调用 Zotero MCP 的进度</span>
+          <button id="clearToolsBtn" type="button">清空</button>
+        </div>
+        <div id="toolList" class="tool-list"></div>
+      </details>
+    </section>
+
+    <footer class="composer">
+      <textarea id="promptInput" rows="4" placeholder="Ask about selected Zotero items, PDFs, annotations, or your library..." spellcheck="false"></textarea>
+      <div class="button-row composer-buttons">
+        <button id="startCodexBtn">Connect</button>
+        <button id="sendBtn" class="primary">Send</button>
+        <button id="newThreadBtn">New</button>
+        <button id="interruptBtn" class="danger">Stop</button>
+      </div>
+    </footer>
+
+    <section class="context-box slim">
+      <details>
+        <summary>Context mode</summary>
+        <div class="context-controls">
+          <label class="context-mode-label">
+            Mode
+            <select id="contextMode">
+              <option value="auto">自动：Reader / 当前选择</option>
+              <option value="items">当前选中文献</option>
+              <option value="collection">当前 Collection</option>
+              <option value="reader">PDF Reader 选中文本</option>
+              <option value="library">Zotero 全库检索</option>
+              <option value="none">无上下文</option>
+            </select>
+          </label>
+          <button id="refreshContextBtn">Refresh</button>
+        </div>
+        <pre id="contextPreview">No context loaded.</pre>
+      </details>
+    </section>
+
+    <section class="settings advanced">
+      <details>
+        <summary>Advanced settings</summary>
+        <div class="settings-grid">
+          <label class="wide">
+            Codex binary
+            <input id="binaryPath" type="text" spellcheck="false" />
+          </label>
+          <label class="wide">
+            Node binary for local bridge
+            <input id="nodeBinaryPath" type="text" spellcheck="false" />
+          </label>
+          <label>
+            Codex port
+            <input id="appServerPort" type="number" min="1024" max="65535" />
+          </label>
+          <label>
+            Bridge port
+            <input id="bridgePort" type="number" min="1024" max="65535" />
+          </label>
+          <label>
+            MCP port
+            <input id="mcpPort" type="number" min="1024" max="65535" />
+          </label>
+          <label>
+            MCP name
+            <input id="mcpServerName" type="text" spellcheck="false" />
+          </label>
+          <label class="wide">
+            Model override, optional
+            <input id="model" type="text" placeholder="leave empty to use Codex config" spellcheck="false" />
+          </label>
+          <label class="wide">
+            Working directory, optional
+            <input id="cwd" type="text" placeholder="leave empty to use Zotero profile workspace" spellcheck="false" />
+          </label>
+          <label class="wide">
+            Extra app-server args, optional
+            <input id="extraArgs" type="text" spellcheck="false" />
+          </label>
+          <label class="check wide">
+            <input id="includeSelectionContext" type="checkbox" />
+            Include current Zotero selection context
+          </label>
+          <label class="wide">
+            System instruction
+            <textarea id="systemInstruction" rows="3" spellcheck="false"></textarea>
+          </label>
+        </div>
+        <div class="button-row">
+          <button id="saveSettingsBtn">Save</button>
+          <button id="refreshStatusBtn">Refresh status</button>
+          <button id="copyMcpConfigBtn">Copy MCP config</button>
+          <button id="stopCodexBtn" class="danger">Stop service</button>
+        </div>
+        <textarea id="mcpConfig" class="config-box" rows="7" spellcheck="false" readonly="readonly"></textarea>
+      </details>
+    </section>
+
+    <div id="toast" class="toast" aria-live="polite"></div>
+  </div>
+</body>
+</html>

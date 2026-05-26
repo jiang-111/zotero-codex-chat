@@ -1,0 +1,334 @@
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --panel-2: #fbfbfc;
+  --text: #1f2328;
+  --muted: #667085;
+  --border: #d9dee7;
+  --blue: #2563eb;
+  --blue-2: #1d4ed8;
+  --green: #15803d;
+  --red: #b42318;
+  --yellow: #a16207;
+  --code: #111827;
+  --shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #181a1f;
+    --panel: #22252b;
+    --panel-2: #1d2026;
+    --text: #e5e7eb;
+    --muted: #a3aab8;
+    --border: #393f4a;
+    --blue: #60a5fa;
+    --blue-2: #3b82f6;
+    --green: #4ade80;
+    --red: #f87171;
+    --yellow: #facc15;
+    --code: #f3f4f6;
+    --shadow: 0 10px 25px rgba(0, 0, 0, 0.22);
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+#app {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto minmax(120px, 1fr) auto auto auto auto;
+  gap: 7px;
+  padding: 9px;
+  overflow: hidden;
+}
+.topbar, .settings, .context-box, .composer, .quick-actions, .tool-activity {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+
+.quick-actions {
+  padding: 7px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.quick-actions button {
+  padding: 6px 7px;
+  font-size: 12px;
+}
+.quick-actions .safe-write {
+  grid-column: 1 / -1;
+  border-color: color-mix(in srgb, var(--green), var(--border) 45%);
+  color: var(--green);
+  font-weight: 650;
+}
+.tool-activity {
+  padding: 6px 9px;
+}
+.tool-activity summary {
+  font-size: 12px;
+}
+.tool-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.tool-header button {
+  padding: 3px 7px;
+  font-size: 11px;
+}
+.tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 116px;
+  overflow: auto;
+  margin-top: 6px;
+}
+.tool-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 5px 6px;
+  font-size: 12px;
+}
+.tool-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 5px;
+  background: var(--yellow);
+}
+.tool-row.done .tool-dot { background: var(--green); }
+.tool-row.error .tool-dot { background: var(--red); }
+.tool-title { font-weight: 650; }
+.tool-meta { color: var(--muted); font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
+
+.topbar {
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+h1 { font-size: 16px; margin: 0; }
+.status-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  white-space: nowrap;
+  background: var(--panel-2);
+  font-size: 11px;
+}
+.pill.ok { color: var(--green); }
+.pill.warn { color: var(--yellow); }
+.pill.bad { color: var(--red); }
+.pill.muted { color: var(--muted); }
+.messages {
+  min-height: 0;
+  overflow: auto;
+  padding: 2px;
+}
+.message {
+  max-width: 96%;
+  margin: 7px 0;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  white-space: pre-wrap;
+}
+.message .role {
+  font-weight: 700;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.message.user { margin-left: auto; border-color: color-mix(in srgb, var(--blue), var(--border) 55%); }
+.message.assistant { margin-right: auto; }
+.message.tool, .message.system { display: none; }
+.message.error { border-color: color-mix(in srgb, var(--red), var(--border) 30%); color: var(--red); }
+.composer { padding: 9px; }
+#promptInput { min-height: 88px; max-height: 220px; }
+.button-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.composer-buttons { justify-content: flex-end; }
+input, textarea, button { font: inherit; }
+input[type="text"], input[type="number"], textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: var(--panel-2);
+  color: var(--text);
+}
+textarea { resize: vertical; }
+button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 9px;
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+}
+button:hover { filter: brightness(0.97); }
+button.primary { background: var(--blue); color: white; border-color: var(--blue); }
+button.primary:hover { background: var(--blue-2); }
+button.danger { color: var(--red); }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+.context-box, .settings { padding: 8px 10px; }
+summary { cursor: pointer; font-weight: 650; color: var(--muted); }
+.context-header { display: flex; justify-content: flex-end; align-items: center; margin-top: 6px; }
+#contextPreview {
+  max-height: 90px;
+  overflow: auto;
+  white-space: pre-wrap;
+  margin: 6px 0 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+label.check { flex-direction: row; align-items: center; color: var(--text); }
+.wide { grid-column: 1 / -1; }
+.config-box {
+  margin-top: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  color: var(--code);
+}
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: rgba(0,0,0,.78);
+  color: #fff;
+  font-size: 12px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .16s ease;
+}
+.toast.show { opacity: 1; }
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  background: rgba(15, 23, 42, 0.42);
+}
+.note-modal {
+  width: min(680px, 96vw);
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 18px 44px rgba(0,0,0,.26);
+}
+.note-modal h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.modal-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.note-preview {
+  min-height: 260px;
+  max-height: 60vh;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+@media (max-width: 440px) {
+  #app { padding: 8px; gap: 7px; }
+  .settings-grid, .quick-actions { grid-template-columns: 1fr; }
+}
+.context-controls {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: end;
+  margin-top: 8px;
+}
+.context-mode-label {
+  min-width: 0;
+}
+select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+}
+@media (max-width: 440px) {
+  .context-controls { grid-template-columns: 1fr; }
+}
+
+
+/* v0.2.4.1: keep the embedded chat usable in Zotero's narrow item pane/sidebar. */
+.sidebar-app .topbar.compact {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.sidebar-app .quick-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.context-box.slim, .settings.advanced {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.context-box.slim details:not([open]) .context-controls,
+.context-box.slim details:not([open]) #contextPreview,
+.settings.advanced details:not([open]) .settings-grid,
+.settings.advanced details:not([open]) .button-row,
+.settings.advanced details:not([open]) .config-box {
+  display: none;
+}
+.sidebar-app .message {
+  overflow-wrap: anywhere;
+}

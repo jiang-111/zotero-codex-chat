@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Copy this file to /home/jiangyi/.local/bin/codex-zotero and chmod +x it.
+# It fixes the reduced PATH problem when Zotero is launched from the desktop GUI.
+export PATH="/home/jiangyi/.nvm/versions/node/v22.22.3/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+exec /home/jiangyi/.nvm/versions/node/v22.22.3/bin/codex "$@"
