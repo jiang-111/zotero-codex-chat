@@ -14,7 +14,12 @@
   let toolCallRows = new Map();
   let toolStats = { running: 0, done: 0, error: 0 };
   let lastAssistantText = "";
+  let activeConversationId = null;
+  let restoringHistory = false;
   const externalPromptQueue = [];
+  const HISTORY_KEY = "zotero-codex-chat.history.v1";
+  const MAX_HISTORY = 30;
+  const MAX_MESSAGES_PER_HISTORY = 120;
 
   function getFrameTargetHint() {
     try {
@@ -54,7 +59,7 @@
     el.className = `pill ${cls || "muted"}`;
   }
 
-  function addMessage(role, content, extraClass) {
+  function addMessage(role, content, extraClass, options = {}) {
     const wrap = document.createElement("div");
     wrap.className = `message ${extraClass || role}`;
     const roleEl = document.createElement("div");
@@ -67,7 +72,11 @@
     const messages = $("messages") || document.body;
     messages.appendChild(wrap);
     if ($("messages")) $("messages").scrollTop = $("messages").scrollHeight;
-    return { wrap, contentEl };
+    const messageRef = { wrap, contentEl, historyIndex: null };
+    if (!options.skipHistory && !restoringHistory && !["tool", "system"].includes(role)) {
+      messageRef.historyIndex = recordHistoryMessage(role, content || "", extraClass || role);
+    }
+    return messageRef;
   }
 
   function appendToActiveAssistant(text) {
@@ -76,7 +85,202 @@
     }
     activeAssistantMessage.contentEl.textContent += text || "";
     lastAssistantText = activeAssistantMessage.contentEl.textContent;
+    updateHistoryMessage(activeAssistantMessage.historyIndex, lastAssistantText);
     if ($("messages")) $("messages").scrollTop = $("messages").scrollHeight;
+  }
+
+  function nowIso() {
+    return new Date().toISOString();
+  }
+
+  function loadHistory() {
+    try {
+      const raw = window.localStorage?.getItem(HISTORY_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function saveHistory(items) {
+    try {
+      const clean = (Array.isArray(items) ? items : [])
+        .filter((item) => item && item.id)
+        .slice(0, MAX_HISTORY);
+      window.localStorage?.setItem(HISTORY_KEY, JSON.stringify(clean));
+    } catch (_) {}
+  }
+
+  function makeConversationTitle(text) {
+    const clean = String(text || "").replace(/\s+/g, " ").trim();
+    if (!clean) return "New chat";
+    return clean.length > 42 ? `${clean.slice(0, 42)}...` : clean;
+  }
+
+  function ensureActiveConversation(titleHint) {
+    if (activeConversationId) return activeConversationId;
+    const history = loadHistory();
+    const id = `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const now = nowIso();
+    history.unshift({
+      id,
+      title: makeConversationTitle(titleHint),
+      createdAt: now,
+      updatedAt: now,
+      threadId: threadId || null,
+      messages: [],
+    });
+    activeConversationId = id;
+    saveHistory(history);
+    renderHistoryList();
+    return id;
+  }
+
+  function updateActiveConversation(mutator) {
+    if (!activeConversationId) return null;
+    const history = loadHistory();
+    const index = history.findIndex((item) => item.id === activeConversationId);
+    if (index < 0) return null;
+    const item = history[index];
+    mutator(item);
+    item.updatedAt = nowIso();
+    if (threadId) item.threadId = threadId;
+    history.splice(index, 1);
+    history.unshift(item);
+    saveHistory(history);
+    renderHistoryList();
+    return item;
+  }
+
+  function getActiveConversation() {
+    if (!activeConversationId) return null;
+    return loadHistory().find((item) => item.id === activeConversationId) || null;
+  }
+
+  function recordHistoryMessage(role, content, extraClass) {
+    ensureActiveConversation(content);
+    let savedIndex = null;
+    updateActiveConversation((item) => {
+      item.messages = Array.isArray(item.messages) ? item.messages : [];
+      if ((!item.title || item.title === "New chat") && role === "user") {
+        item.title = makeConversationTitle(content);
+      }
+      item.messages.push({
+        role,
+        content: String(content || ""),
+        extraClass: extraClass || role,
+        ts: nowIso(),
+      });
+      if (item.messages.length > MAX_MESSAGES_PER_HISTORY) {
+        item.messages = item.messages.slice(-MAX_MESSAGES_PER_HISTORY);
+      }
+      savedIndex = item.messages.length - 1;
+    });
+    return savedIndex;
+  }
+
+  function updateHistoryMessage(historyIndex, content) {
+    if (historyIndex === null || historyIndex === undefined) return;
+    updateActiveConversation((item) => {
+      const msg = Array.isArray(item.messages) ? item.messages[historyIndex] : null;
+      if (msg) msg.content = String(content || "");
+    });
+  }
+
+  function formatHistoryDate(value) {
+    try {
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return "";
+      return d.toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function renderHistoryList() {
+    const list = $("historyList");
+    if (!list) return;
+    const history = loadHistory();
+    list.textContent = "";
+    if (!history.length) {
+      const empty = document.createElement("div");
+      empty.className = "history-meta";
+      empty.textContent = "No saved chats yet.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const item of history) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = `history-item${item.id === activeConversationId ? " active" : ""}`;
+      row.title = item.title || "Untitled chat";
+      const title = document.createElement("div");
+      title.className = "history-title";
+      title.textContent = item.title || "Untitled chat";
+      const meta = document.createElement("div");
+      meta.className = "history-meta";
+      meta.textContent = formatHistoryDate(item.updatedAt);
+      row.append(title, meta);
+      row.addEventListener("click", () => loadConversation(item.id));
+      list.appendChild(row);
+    }
+  }
+
+  function clearMessagesView() {
+    const messages = $("messages");
+    if (messages) messages.textContent = "";
+    activeAssistantMessage = null;
+    lastAssistantText = "";
+    resetToolActivity();
+  }
+
+  function loadConversation(id) {
+    const item = loadHistory().find((entry) => entry.id === id);
+    if (!item) return;
+    activeConversationId = item.id;
+    threadId = item.threadId || null;
+    currentTurnId = null;
+    clearMessagesView();
+    restoringHistory = true;
+    try {
+      for (const msg of item.messages || []) {
+        const ref = addMessage(msg.role || "assistant", msg.content || "", msg.extraClass || msg.role || "assistant", { skipHistory: true });
+        if ((msg.role || "") === "assistant") lastAssistantText = msg.content || "";
+        ref.historyIndex = null;
+      }
+    } finally {
+      restoringHistory = false;
+    }
+    renderHistoryList();
+    showToast("Loaded chat history");
+  }
+
+  function saveCurrentConversation() {
+    const active = getActiveConversation();
+    if (!active && !$("messages")?.children?.length) {
+      showToast("No chat to save");
+      return;
+    }
+    ensureActiveConversation("New chat");
+    updateActiveConversation((item) => {
+      if (!item.title || item.title === "New chat") {
+        const firstUser = (item.messages || []).find((msg) => msg.role === "user");
+        item.title = makeConversationTitle(firstUser?.content || item.title);
+      }
+    });
+    showToast("Chat saved");
+  }
+
+  function clearHistory() {
+    if (!window.confirm("Clear only Zotero Codex Chat local history? Zotero notes, PDFs, and Codex CLI history will not be changed.")) return;
+    saveHistory([]);
+    activeConversationId = null;
+    threadId = null;
+    currentTurnId = null;
+    clearMessagesView();
+    renderHistoryList();
+    showToast("History cleared");
   }
 
   function setBusy(busy) {
@@ -261,7 +465,7 @@
       clientInfo: {
         name: "zotero_codex_chat",
         title: "Zotero Codex Chat",
-        version: "0.1.1",
+        version: "0.1.2",
       },
       capabilities: {
         experimentalApi: true,
@@ -681,6 +885,7 @@
 
     if (method === "thread/started") {
       if (params.thread?.id) threadId = params.thread.id;
+      updateActiveConversation((item) => { item.threadId = threadId; });
       return;
     }
     if (method === "turn/started") {
@@ -780,6 +985,7 @@
     const result = await request("thread/start", params);
     threadId = result?.thread?.id || threadId;
     if (!threadId) throw new Error("Codex did not return a thread id.");
+    updateActiveConversation((item) => { item.threadId = threadId; });
     return threadId;
   }
 
@@ -828,6 +1034,7 @@
   async function submitPromptText(text, displayText) {
     const clean = String(text || "").trim();
     if (!clean) return;
+    ensureActiveConversation(displayText || clean);
     addMessage("user", displayText || clean, "user");
     $("promptInput").value = "";
     setBusy(true);
@@ -907,10 +1114,14 @@
   }
 
   async function newThread() {
+    const active = getActiveConversation();
+    if (active?.messages?.length) saveCurrentConversation();
     threadId = null;
     currentTurnId = null;
-    activeAssistantMessage = null;
-    resetToolActivity();
+    activeConversationId = null;
+    clearMessagesView();
+    ensureActiveConversation("New chat");
+    renderHistoryList();
     showToast("New thread");
   }
 
@@ -993,6 +1204,8 @@
     $("quickAnnotationsBtn")?.addEventListener("click", () => quickPrompt("annotations"));
     $("writeNoteBtn")?.addEventListener("click", writeLatestAssistantNote);
     $("clearToolsBtn")?.addEventListener("click", resetToolActivity);
+    $("saveHistoryBtn")?.addEventListener("click", saveCurrentConversation);
+    $("clearHistoryBtn")?.addEventListener("click", clearHistory);
     $("newThreadBtn").addEventListener("click", newThread);
     $("interruptBtn").addEventListener("click", interruptTurn);
     $("promptInput").addEventListener("keydown", (event) => {
@@ -1015,6 +1228,7 @@
       renderSettings();
       refreshContext();
       resetToolActivity();
+      renderHistoryList();
       setBusy(false);
       await refreshAllStatus();
       drainExternalPromptQueue();

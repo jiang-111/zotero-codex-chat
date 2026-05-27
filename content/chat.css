@@ -42,12 +42,12 @@ body {
 #app {
   height: 100vh;
   display: grid;
-  grid-template-rows: auto auto minmax(120px, 1fr) auto auto auto auto;
+  grid-template-rows: auto auto auto minmax(120px, 1fr) auto auto auto auto;
   gap: 7px;
   padding: 9px;
   overflow: hidden;
 }
-.topbar, .settings, .context-box, .composer, .quick-actions, .tool-activity {
+.topbar, .settings, .context-box, .composer, .quick-actions, .tool-activity, .history-panel {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -119,6 +119,51 @@ body {
 .tool-row.error .tool-dot { background: var(--red); }
 .tool-title { font-weight: 650; }
 .tool-meta { color: var(--muted); font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
+.history-panel {
+  padding: 6px 9px;
+}
+.history-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 7px;
+}
+.history-toolbar button {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 142px;
+  overflow: auto;
+  margin-top: 7px;
+}
+.history-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 6px 7px;
+}
+.history-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.history-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+.history-item.active {
+  border-color: color-mix(in srgb, var(--blue), var(--border) 45%);
+}
 
 .topbar {
   padding: 8px 10px;
@@ -169,7 +214,7 @@ h1 { font-size: 16px; margin: 0; }
 .message.tool, .message.system { display: none; }
 .message.error { border-color: color-mix(in srgb, var(--red), var(--border) 30%); color: var(--red); }
 .composer { padding: 9px; }
-#promptInput { min-height: 88px; max-height: 220px; }
+#promptInput { min-height: 128px; max-height: 340px; }
 .button-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .composer-buttons { justify-content: flex-end; }
 input, textarea, button { font: inherit; }
@@ -326,7 +371,9 @@ select {
 .context-box.slim details:not([open]) #contextPreview,
 .settings.advanced details:not([open]) .settings-grid,
 .settings.advanced details:not([open]) .button-row,
-.settings.advanced details:not([open]) .config-box {
+.settings.advanced details:not([open]) .config-box,
+.history-panel details:not([open]) .history-toolbar,
+.history-panel details:not([open]) .history-list {
   display: none;
 }
 .sidebar-app .message {
