@@ -98,6 +98,10 @@
 
   function loadHistory() {
     try {
+      const stored = getAddon().getChatHistory?.();
+      if (Array.isArray(stored)) return stored;
+    } catch (_) {}
+    try {
       const raw = window.localStorage?.getItem(HISTORY_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
       return Array.isArray(parsed) ? parsed : [];
@@ -107,11 +111,27 @@
   }
 
   function saveHistory(items) {
+    const clean = (Array.isArray(items) ? items : [])
+      .filter((item) => item && item.id)
+      .slice(0, MAX_HISTORY);
     try {
-      const clean = (Array.isArray(items) ? items : [])
-        .filter((item) => item && item.id)
-        .slice(0, MAX_HISTORY);
+      getAddon().saveChatHistory?.(clean);
+    } catch (_) {}
+    try {
       window.localStorage?.setItem(HISTORY_KEY, JSON.stringify(clean));
+    } catch (_) {}
+  }
+
+  function migrateLocalHistoryIfNeeded() {
+    let addonHistory = [];
+    try {
+      addonHistory = getAddon().getChatHistory?.() || [];
+    } catch (_) {}
+    if (Array.isArray(addonHistory) && addonHistory.length) return;
+    try {
+      const raw = window.localStorage?.getItem(HISTORY_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed) && parsed.length) saveHistory(parsed);
     } catch (_) {}
   }
 
@@ -472,7 +492,7 @@
       clientInfo: {
         name: "zotero_codex_chat",
         title: "Zotero Codex Chat",
-        version: "0.1.2",
+        version: "0.1.3",
       },
       capabilities: {
         experimentalApi: true,
@@ -1271,6 +1291,7 @@
       renderSettings();
       refreshContext();
       resetToolActivity();
+      migrateLocalHistoryIfNeeded();
       renderHistoryList();
       setBusy(false);
       await refreshAllStatus();

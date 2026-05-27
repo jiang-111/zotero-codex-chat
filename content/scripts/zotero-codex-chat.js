@@ -848,6 +848,28 @@
       return this.getSettings();
     },
 
+    getChatHistory() {
+      const raw = String(getPref("chat.history", "") || "");
+      if (!raw) return [];
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        log(`Failed to parse chat history: ${e}`, "error");
+        return [];
+      }
+    },
+
+    saveChatHistory(items) {
+      try {
+        setPref("chat.history", JSON.stringify(Array.isArray(items) ? items : []));
+        return true;
+      } catch (e) {
+        log(`Failed to save chat history: ${e}`, "error");
+        return false;
+      }
+    },
+
     buildCodexMCPToml() {
       const s = this.getSettings();
       const serverName = (s.mcpServerName || "zotero").replace(/[^A-Za-z0-9_-]/g, "_");
