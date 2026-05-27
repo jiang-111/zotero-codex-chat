@@ -20,6 +20,8 @@
   const HISTORY_KEY = "zotero-codex-chat.history.v1";
   const MAX_HISTORY = 30;
   const MAX_MESSAGES_PER_HISTORY = 120;
+  const MAX_PROMPT_HISTORY_MESSAGES = 24;
+  const MAX_PROMPT_HISTORY_CHARS = 14000;
 
   function getFrameTargetHint() {
     try {
@@ -74,7 +76,8 @@
     if ($("messages")) $("messages").scrollTop = $("messages").scrollHeight;
     const messageRef = { wrap, contentEl, historyIndex: null };
     if (!options.skipHistory && !restoringHistory && !["tool", "system"].includes(role)) {
-      messageRef.historyIndex = recordHistoryMessage(role, content || "", extraClass || role);
+      const historyContent = options.historyContent === undefined ? content : options.historyContent;
+      messageRef.historyIndex = recordHistoryMessage(role, historyContent || "", extraClass || role);
     }
     return messageRef;
   }
@@ -156,6 +159,10 @@
   function getActiveConversation() {
     if (!activeConversationId) return null;
     return loadHistory().find((item) => item.id === activeConversationId) || null;
+  }
+
+  function normalizeHistoryText(text) {
+    return String(text || "").replace(/\s+/g, " ").trim();
   }
 
   function recordHistoryMessage(role, content, extraClass) {
@@ -989,11 +996,48 @@
     return threadId;
   }
 
+  function buildLocalHistoryContext(userText) {
+    const active = getActiveConversation();
+    const source = Array.isArray(active?.messages) ? active.messages : [];
+    if (!source.length) return "";
+
+    const latestUser = normalizeHistoryText(userText);
+    const messages = source
+      .filter((msg) => ["user", "assistant"].includes(msg?.role) && String(msg?.content || "").trim())
+      .map((msg) => ({
+        role: msg.role,
+        content: String(msg.content || "").trim(),
+      }));
+
+    const last = messages.at(-1);
+    if (last?.role === "user" && normalizeHistoryText(last.content) === latestUser) {
+      messages.pop();
+    }
+    if (!messages.length) return "";
+
+    const recent = messages.slice(-MAX_PROMPT_HISTORY_MESSAGES);
+    const lines = [];
+    let total = 0;
+    for (let i = recent.length - 1; i >= 0; i -= 1) {
+      const msg = recent[i];
+      const label = msg.role === "user" ? "User" : "Assistant";
+      const entry = `${label}: ${msg.content}`;
+      total += entry.length;
+      if (total > MAX_PROMPT_HISTORY_CHARS && lines.length) break;
+      lines.unshift(entry);
+    }
+    return lines.join("\n\n");
+  }
+
   function buildPrompt(userText) {
     settings = getAddon().getSettings();
     const parts = [];
     if (settings.systemInstruction) {
       parts.push(`[System instruction for this Zotero chat]\n${settings.systemInstruction}`);
+    }
+    const localHistory = buildLocalHistoryContext(userText);
+    if (localHistory) {
+      parts.push(`[Local chat history loaded from this Zotero Codex Chat panel]\nContinue the conversation using this visible local transcript as context. It may be the only available history if the Codex service or bridge was restarted.\n\n${localHistory}`);
     }
     const ctx = getAddon().formatContextForPrompt(currentContextMode());
     if (ctx) {
@@ -1015,7 +1059,6 @@
       return;
     }
     $("promptInput").value = prompt;
-    addMessage("user", p.displayText || "Ask Codex from PDF selection", "user");
     showToast("已填入选中文本，点击发送继续");
   }
 
@@ -1035,7 +1078,7 @@
     const clean = String(text || "").trim();
     if (!clean) return;
     ensureActiveConversation(displayText || clean);
-    addMessage("user", displayText || clean, "user");
+    addMessage("user", displayText || clean, "user", { historyContent: clean });
     $("promptInput").value = "";
     setBusy(true);
     try {
