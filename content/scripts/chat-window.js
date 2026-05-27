@@ -22,7 +22,7 @@
   const MAX_HISTORY = 30;
   const MAX_MESSAGES_PER_HISTORY = 120;
   const MAX_PROMPT_HISTORY_MESSAGES = 24;
-  const MAX_PROMPT_HISTORY_CHARS = 14000;
+  const MAX_PROMPT_HISTORY_CHARS = 8000;
 
   function getFrameTargetHint() {
     try {
@@ -364,6 +364,7 @@
     $("cwd").value = settings.configuredCwd || "";
     $("extraArgs").value = settings.extraArgs || "";
     $("includeSelectionContext").checked = !!settings.includeSelectionContext;
+    $("isolateCodexSessions").checked = settings.isolateCodexSessions !== false;
     const contextMode = $("contextMode");
     if (contextMode) contextMode.value = settings.contextMode || "auto";
     $("systemInstruction").value = settings.systemInstruction || "";
@@ -383,6 +384,7 @@
       cwd: $("cwd").value,
       extraArgs: $("extraArgs").value,
       includeSelectionContext: $("includeSelectionContext").checked,
+      isolateCodexSessions: $("isolateCodexSessions").checked,
       contextMode: $("contextMode") ? $("contextMode").value : "auto",
       systemInstruction: $("systemInstruction").value,
     };
@@ -752,6 +754,14 @@
     return /批注|注释|全库|mcp|搜索库|search|annotation/i.test(currentUserPromptText || "");
   }
 
+  function isCurrentPaperReadingPrompt(text) {
+    return /当前文献|当前论文|这篇文献|这篇论文|这篇文章|本文|this work|这项工作|本文工作|本文的工作|介绍的是什么|gap|贡献|方法|实验|结果|结论|摘要|总结|概括|概述/i.test(text || "");
+  }
+
+  function promptWantsLibraryMCP(text) {
+    return /\bmcp\b|Zotero MCP|搜索库|全库|文献库|相关文献|找.*文献|library search|search library|related papers|annotations?|批注|注释/i.test(text || "");
+  }
+
   function acceptServerRequest(msg, result) {
     sendRaw({ id: msg.id, result: result || { action: "accept", content: {} } });
   }
@@ -763,6 +773,10 @@
 
   function confirmReadMCP(method, params) {
     const toolName = extractToolNameFromParams(params) || "unknown tool";
+    if (isCurrentPaperReadingPrompt(currentUserPromptText) && !promptWantsLibraryMCP(currentUserPromptText)) {
+      showToast(`当前文献阅读已转后台 RAG，跳过 MCP：${toolName}`);
+      return false;
+    }
     if (isMainThreadFullTextToolName(toolName, params)) {
       showToast(`已拦截 Zotero 主线程全文读取：${toolName}`);
       return false;
@@ -1122,7 +1136,7 @@
   function formatBackgroundReadContext(job, result) {
     const item = result?.item || job?.payload?.item || {};
     const lines = [];
-    lines.push("This PDF text was extracted by Zotero Codex Chat's external background reader process. It did not run through Zotero MCP and should be preferred over calling Zotero MCP full-text tools.");
+    lines.push("This PDF context was extracted by Zotero Codex Chat's external background reader process. Full extracted text is cached locally, but only selected excerpts are attached here to save tokens. It did not run through Zotero MCP and should be preferred over calling Zotero MCP full-text tools.");
     if (item.title) lines.push(`Title: ${item.title}`);
     if (item.creators) lines.push(`Creators: ${item.creators}`);
     if (item.date || item.year) lines.push(`Date: ${item.date || item.year}`);
@@ -1138,7 +1152,9 @@
         const bits = [
           source.title || source.key || "attachment",
           source.method ? `method=${source.method}` : "",
+          source.cached ? "cache=hit" : "cache=miss",
           source.chars !== undefined ? `chars=${source.chars}` : "",
+          source.totalChars !== undefined ? `total=${source.totalChars}` : "",
           source.warning ? `warning=${source.warning}` : "",
         ].filter(Boolean);
         lines.push(`- ${bits.join(" | ")}`);
@@ -1147,7 +1163,7 @@
 
     const text = String(result?.text || "").trim();
     if (text) {
-      lines.push(`Extracted PDF/full-text content:\n${text}`);
+      lines.push(`Selected PDF/full-text excerpts:\n${text}`);
     } else {
       lines.push("No PDF full text was extracted. Use the metadata and visible Zotero context only; do not call Zotero MCP full-text tools unless the user asks again.");
     }
@@ -1176,8 +1192,30 @@
     }
   }
 
-  async function readBackgroundContextForPrompt() {
-    const job = await getAddon().prepareBackgroundRead?.(getFrameTargetHint(), { maxChars: 45000 });
+  function wantsFullBackgroundRead(text, options) {
+    if (options?.forceFullBackgroundRead) return true;
+    return /完整全文|全文贴出|全文读取|读取全文|PDF全文|pdf全文|整篇全文|full text|entire pdf/i.test(text || "");
+  }
+
+  function backgroundReadBudget(text, options = {}) {
+    if (options.maxBackgroundChars) return Number(options.maxBackgroundChars);
+    if (wantsFullBackgroundRead(text, options)) return 45000;
+    const query = String(text || "");
+    if (/阅读笔记|读书笔记|详细笔记|精读|逐节|逐段|deep read|detailed notes/i.test(query)) return 14000;
+    if (/总结|摘要|概括|概述|全文大意|讲什么|survey|summarize|summary/i.test(query)) return 9500;
+    if (/方法|实验|结果|结论|贡献|gap|局限|limitation|method|experiment|result|conclusion|contribution/i.test(query)) return 7000;
+    return 5500;
+  }
+
+  async function readBackgroundContextForPrompt(userText, options = {}) {
+    const forceFull = wantsFullBackgroundRead(userText, options);
+    const maxChars = backgroundReadBudget(userText, options);
+    const job = await getAddon().prepareBackgroundRead?.(getFrameTargetHint(), {
+      maxChars,
+      maxExtractChars: 500000,
+      forceFull,
+      query: userText || "",
+    });
     if (!job?.ok) throw new Error(job?.message || "Background reader could not prepare the current Zotero item.");
     const ready = await waitForBackgroundReaderReady(job.readyUrl);
     if (!ready) throw new Error(`Background reader did not become ready at ${job.readyUrl}.`);
@@ -1195,7 +1233,7 @@
 
   function shouldUseBackgroundRead(text, options) {
     if (options?.backgroundRead) return true;
-    return /深度读取|读取全文|全文读取|PDF全文|pdf全文|读PDF|读取PDF|PDF首页|pdf首页|附件全文|摘要|总结|概括|概述|当前文献|这篇文献|这篇论文|阅读笔记/i.test(text || "");
+    return /深度读取|读取全文|全文读取|PDF全文|pdf全文|读PDF|读取PDF|PDF首页|pdf首页|附件全文|摘要|总结|概括|概述|当前文献|当前论文|这篇文献|这篇论文|这篇文章|本文|this work|这项工作|本文工作|本文的工作|介绍的是什么|gap|贡献|方法|实验|结果|结论|阅读笔记/i.test(text || "");
   }
 
   function buildPrompt(userText, backgroundContext) {
@@ -1204,6 +1242,7 @@
     if (settings.systemInstruction) {
       parts.push(`[System instruction for this Zotero chat]\n${settings.systemInstruction}`);
     }
+    parts.push(`[Zotero tool routing]\nRoute intelligently. For questions about the currently selected/open paper itself, including summary, gap, contribution, method, experiments, results, conclusions, "This work", "本文/这篇论文/这篇文章", use the provided Zotero context and the background reader/RAG excerpts. Do not call Zotero MCP for current-paper reading or lightweight metadata when background/RAG context is available. Use Zotero MCP only for cross-library tasks such as searching the Zotero library, finding related papers, listing collections/items, or reading annotations when the user asks for annotations. If an MCP call is unavailable, slow, declined, or times out, immediately fall back to the provided context/RAG and answer instead of waiting or asking the user to enable MCP.`);
     const localHistory = buildLocalHistoryContext(userText);
     if (localHistory) {
       parts.push(`[Local chat history loaded from this Zotero Codex Chat panel]\nContinue the conversation using this visible local transcript as context. It may be the only available history if the Codex service or bridge was restarted.\n\n${localHistory}`);
@@ -1215,7 +1254,7 @@
     if (ctx) {
       parts.push(`[Zotero context]\n${ctx}`);
     }
-    parts.push(`[MCP safety]\nThe Zotero MCP server may be available as '${settings.mcpServerName || "zotero"}', but MCP calls run inside Zotero and can freeze the UI. Use the provided Zotero context and background PDF text first. Light metadata tools such as search_library, get_item_details, get_item_abstract, and collection/item listing are OK when they help with title, DOI, URL, authors, dates, or attachment clues. Do not call get_content, search_fulltext, fulltext_database, get_annotations, search_annotations, semantic_search, or other PDF/full-text/annotation tools unless the user explicitly asks for annotations, library search, or MCP. For full-text reading, prefer the provided background reader content and do not use Zotero MCP full-text tools.`);
+    parts.push(`[MCP safety]\nThe Zotero MCP server may be available as '${settings.mcpServerName || "zotero"}', but MCP calls run inside Zotero and can freeze the UI or time out. Prefer the background reader/RAG for the currently selected paper. Do not call get_content, search_fulltext, fulltext_database, get_annotations, search_annotations, semantic_search, or other PDF/full-text/annotation tools unless the user explicitly asks for annotations, library search, or MCP. For current-paper reading, do not call search_library, get_item_details, get_item_abstract, or collection/item listing just to answer; use the already provided Zotero context and RAG excerpts. For cross-library discovery or related-paper search, light metadata MCP tools are allowed.`);
     parts.push(`[User request]\n${userText}`);
     return parts.join("\n\n");
   }
@@ -1259,7 +1298,7 @@
       if (shouldUseBackgroundRead(clean, options)) {
         showToast("后台读取当前 PDF，不占用 Zotero 浏览");
         try {
-          backgroundContext = await readBackgroundContextForPrompt();
+          backgroundContext = await readBackgroundContextForPrompt(clean, options);
           showToast("后台 PDF 读取完成");
         } catch (readError) {
           const message = String(readError?.message || readError);

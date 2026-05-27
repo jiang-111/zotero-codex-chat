@@ -100,6 +100,7 @@
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const crypto = require('crypto');
 const { execFile } = require('child_process');
 
 function argValue(name, fallback) {
@@ -127,7 +128,7 @@ function cleanText(text) {
 
 function readTextFile(filePath, maxChars) {
   const text = cleanText(fs.readFileSync(filePath, 'utf8'));
-  return text.slice(0, maxChars);
+  return maxChars ? text.slice(0, maxChars) : text;
 }
 
 function findCacheFile(filePath) {
@@ -160,21 +161,174 @@ function runPdftotext(filePath, maxChars) {
           return;
         }
         const text = cleanText(stdout || '');
-        resolve({ ok: !!text, text: text.slice(0, maxChars), warning: stderr ? String(stderr).slice(0, 500) : '' });
+        resolve({ ok: !!text, text: maxChars ? text.slice(0, maxChars) : text, warning: stderr ? String(stderr).slice(0, 500) : '' });
       });
     };
     tryNext();
   });
 }
 
-async function extractAttachment(attachment, maxChars) {
+function cacheKeyForAttachment(filePath) {
+  let stat = null;
+  try { stat = fs.statSync(filePath); } catch (_) {}
+  return crypto.createHash('sha256').update(JSON.stringify({
+    path: filePath,
+    size: stat ? stat.size : 0,
+    mtimeMs: stat ? Math.floor(stat.mtimeMs) : 0,
+  })).digest('hex');
+}
+
+function readCachedExtraction(cacheDir, key) {
+  if (!cacheDir || !key) return null;
+  try {
+    const file = path.join(cacheDir, key + '.json');
+    if (!fs.existsSync(file)) return null;
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeCachedExtraction(cacheDir, key, data) {
+  if (!cacheDir || !key) return;
+  try {
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(path.join(cacheDir, key + '.json'), JSON.stringify(data), 'utf8');
+  } catch (_) {}
+}
+
+function cjkNgrams(parts) {
+  const grams = [];
+  for (const part of parts) {
+    grams.push(part);
+    if (part.length > 2) {
+      for (let i = 0; i < part.length - 1; i += 1) grams.push(part.slice(i, i + 2));
+      for (let i = 0; i < part.length - 2; i += 1) grams.push(part.slice(i, i + 3));
+    }
+  }
+  return grams;
+}
+
+function termsFromQuery(query) {
+  const text = String(query || '').toLowerCase();
+  const ascii = text.match(/[a-z0-9][a-z0-9_-]{2,}/g) || [];
+  const cjk = text.match(/[\\u4e00-\\u9fff]{2,}/g) || [];
+  const stop = new Set(['the', 'and', 'for', 'with', 'this', 'that', 'from', 'about', 'what', 'which', '论文', '文献', '当前', '这篇', '总结', '摘要', '概括', '一下']);
+  return Array.from(new Set([...ascii, ...cjkNgrams(cjk)])).filter((term) => !stop.has(term)).slice(0, 40);
+}
+
+function tokensFromText(text) {
+  const lower = String(text || '').toLowerCase();
+  const ascii = lower.match(/[a-z0-9][a-z0-9_-]{2,}/g) || [];
+  const cjk = lower.match(/[\\u4e00-\\u9fff]{2,}/g) || [];
+  return [...ascii, ...cjkNgrams(cjk)];
+}
+
+function splitTextChunks(text, size = 2200, overlap = 180) {
+  const clean = cleanText(text);
+  const chunks = [];
+  let start = 0;
+  while (start < clean.length) {
+    const end = Math.min(clean.length, start + size);
+    chunks.push({ start, end, text: clean.slice(start, end) });
+    if (end >= clean.length) break;
+    start = Math.max(end - overlap, start + 1);
+  }
+  return chunks;
+}
+
+function selectTextForPrompt(text, query, maxChars, forceFull) {
+  const clean = cleanText(text);
+  const budget = Math.max(2000, Number(maxChars || 14000));
+  if (!clean || forceFull || clean.length <= budget) {
+    return { text: clean.slice(0, budget), includedChars: Math.min(clean.length, budget), totalChars: clean.length, strategy: forceFull ? 'full-request' : 'fits-budget' };
+  }
+
+  const terms = termsFromQuery(query);
+  const chunks = splitTextChunks(clean);
+  const selected = [];
+  let used = 0;
+  const lowerQuery = String(query || '').toLowerCase();
+  const wantsOverview = /总结|摘要|概括|概述|讲什么|overview|summary|summarize/.test(lowerQuery);
+
+  function addChunk(chunk, label) {
+    if (!chunk || selected.some((item) => item.start === chunk.start)) return;
+    const header = '\\n\\n[' + label + ' chars ' + chunk.start + '-' + chunk.end + ']\\n';
+    const room = budget - used - header.length;
+    if (room <= 300) return;
+    const body = chunk.text.slice(0, room);
+    selected.push({ start: chunk.start, rendered: header + body });
+    used += header.length + body.length;
+  }
+
+  if (terms.length) {
+    const chunkStats = chunks.map((chunk, index) => {
+      const tokens = tokensFromText(chunk.text);
+      const counts = new Map();
+      for (const token of tokens) counts.set(token, (counts.get(token) || 0) + 1);
+      return { ...chunk, index, tokens, counts, len: Math.max(1, tokens.length) };
+    });
+    const avgLen = chunkStats.reduce((sum, chunk) => sum + chunk.len, 0) / Math.max(1, chunkStats.length);
+    const docFreq = new Map();
+    for (const term of terms) {
+      let df = 0;
+      for (const chunk of chunkStats) {
+        if (chunk.counts.has(term) || chunk.text.toLowerCase().includes(term)) df += 1;
+      }
+      docFreq.set(term, df);
+    }
+    const k1 = 1.2;
+    const b = 0.75;
+    const scored = chunkStats.map((chunk) => {
+      let score = 0;
+      const lower = chunk.text.toLowerCase();
+      for (const term of terms) {
+        const df = docFreq.get(term) || 0;
+        if (!df) continue;
+        const idf = Math.log(1 + (chunkStats.length - df + 0.5) / (df + 0.5));
+        const exact = chunk.counts.get(term) || 0;
+        const contains = exact ? 0 : (lower.includes(term) ? 1 : 0);
+        const tf = exact || contains;
+        if (!tf) continue;
+        score += idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (chunk.len / avgLen))));
+      }
+      if (/abstract|introduction|conclusion|discussion|method|experiment|evaluation|摘要|引言|结论|方法|实验|评估/i.test(chunk.text)) score += 0.25;
+      return { ...chunk, score };
+    }).filter((chunk) => chunk.score > 0).sort((a, b) => b.score - a.score || a.index - b.index);
+    for (const chunk of scored.slice(0, 10)) {
+      if (used > budget - 600) break;
+      addChunk(chunk, 'local RAG excerpt score=' + chunk.score.toFixed(2));
+    }
+  }
+
+  const conclusion = chunks.find((chunk) => /conclusion|discussion|结论|讨论/i.test(chunk.text));
+  if (!selected.length || wantsOverview) addChunk(chunks[0], 'opening excerpt');
+  if ((wantsOverview || !selected.length) && used < budget - 800) {
+    addChunk(conclusion || chunks[chunks.length - 1], conclusion ? 'conclusion excerpt' : 'ending excerpt');
+  }
+
+  selected.sort((a, b) => a.start - b.start);
+  return {
+    text: selected.map((item) => item.rendered).join('').trim(),
+    includedChars: selected.reduce((sum, item) => sum + item.rendered.length, 0),
+    totalChars: clean.length,
+    strategy: terms.length ? 'local-rag-bm25' : 'overview-excerpts',
+  };
+}
+
+async function extractAttachment(attachment, options) {
+  const maxExtractChars = Math.max(1000, Math.min(Number(options.maxExtractChars || 500000), 1000000));
   const filePath = String(attachment.path || '');
+  const cacheDir = String(options.cacheDir || '');
+  const key = filePath ? cacheKeyForAttachment(filePath) : '';
   const source = {
     key: attachment.key || '',
     title: attachment.title || '',
     path: filePath,
     method: '',
     chars: 0,
+    totalChars: 0,
+    cached: false,
     warning: '',
   };
   try {
@@ -183,28 +337,43 @@ async function extractAttachment(attachment, maxChars) {
       return { source, text: '' };
     }
 
+    const cached = readCachedExtraction(cacheDir, key);
+    if (cached && typeof cached.text === 'string') {
+      source.method = cached.method || 'cache';
+      source.chars = cached.text.length;
+      source.totalChars = cached.text.length;
+      source.cached = true;
+      return { source, text: cached.text };
+    }
+
     const cache = findCacheFile(filePath);
     if (cache) {
-      const text = readTextFile(cache, maxChars);
+      const text = readTextFile(cache, maxExtractChars);
       source.method = 'zotero-ft-cache';
       source.chars = text.length;
+      source.totalChars = text.length;
       source.path = cache;
+      writeCachedExtraction(cacheDir, key, { method: source.method, text, createdAt: new Date().toISOString(), attachment });
       return { source, text };
     }
 
     const ext = path.extname(filePath).toLowerCase();
     if (ext === '.pdf') {
-      const result = await runPdftotext(filePath, maxChars);
+      const result = await runPdftotext(filePath, maxExtractChars);
       source.method = 'pdftotext';
       source.chars = result.text.length;
+      source.totalChars = result.text.length;
       source.warning = result.warning || '';
+      if (result.text) writeCachedExtraction(cacheDir, key, { method: source.method, text: result.text, createdAt: new Date().toISOString(), attachment });
       return { source, text: result.text || '' };
     }
 
     if (['.txt', '.md', '.html', '.htm'].includes(ext)) {
-      const text = readTextFile(filePath, maxChars);
+      const text = readTextFile(filePath, maxExtractChars);
       source.method = 'file';
       source.chars = text.length;
+      source.totalChars = text.length;
+      writeCachedExtraction(cacheDir, key, { method: source.method, text, createdAt: new Date().toISOString(), attachment });
       return { source, text };
     }
 
@@ -249,7 +418,9 @@ const server = http.createServer(async (req, res) => {
   }
   try {
     const payload = JSON.parse(await readRequestBody(req) || '{}');
-    const maxChars = Math.max(1000, Math.min(Number(payload.maxChars || 45000), 120000));
+    const maxChars = Math.max(1000, Math.min(Number(payload.maxChars || 14000), 60000));
+    const maxExtractChars = Math.max(maxChars, Math.min(Number(payload.maxExtractChars || 500000), 1000000));
+    const forceFull = !!payload.forceFull;
     const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 6) : [];
     let remaining = maxChars;
     const chunks = [];
@@ -257,11 +428,18 @@ const server = http.createServer(async (req, res) => {
 
     for (const attachment of attachments) {
       if (remaining <= 0) break;
-      const result = await extractAttachment(attachment, remaining);
+      const result = await extractAttachment(attachment, {
+        cacheDir: payload.cacheDir,
+        maxExtractChars,
+      });
       sources.push(result.source);
       if (result.text) {
-        chunks.push('## Attachment: ' + (attachment.title || attachment.key || path.basename(attachment.path || 'PDF')) + '\\n' + result.text);
-        remaining -= result.text.length;
+        const selected = selectTextForPrompt(result.text, payload.query || '', remaining, forceFull);
+        chunks.push('## Attachment: ' + (attachment.title || attachment.key || path.basename(attachment.path || 'PDF')) +
+          '\\nSelection strategy: ' + selected.strategy +
+          '\\nIncluded chars: ' + selected.includedChars + ' / extracted chars: ' + selected.totalChars +
+          '\\n' + selected.text);
+        remaining -= selected.includedChars;
       }
     }
 
@@ -385,6 +563,58 @@ process.on('SIGINT', () => server.close(() => process.exit(0)));
     const dir = guessWorkingDirectory();
     ensureDir(dir);
     return dir + "/zotero-codex-background-reader.js";
+  }
+
+  function isolatedCodexHomePath() {
+    const profile = getProfileDirPath();
+    const base = profile || guessWorkingDirectory() || getHomeDirPath();
+    return base + "/zotero-codex-chat-codex-home";
+  }
+
+  function backgroundReadCacheDirPath() {
+    const profile = getProfileDirPath();
+    const base = profile || guessWorkingDirectory() || getHomeDirPath();
+    return base + "/zotero-codex-chat-cache/pdf-text";
+  }
+
+  function shellSingleQuote(value) {
+    return "'" + String(value || "").replace(/'/g, "'\\''") + "'";
+  }
+
+  function codexLauncherPath() {
+    const dir = guessWorkingDirectory();
+    ensureDir(dir);
+    return dir + "/zotero-codex-launcher.sh";
+  }
+
+  function prepareCodexLauncher(binaryPath) {
+    const codexHome = isolatedCodexHomePath();
+    ensureDir(codexHome);
+    ensureDir(codexHome + "/sessions");
+    const script = [
+      "#!/usr/bin/env bash",
+      "set -e",
+      `export CODEX_HOME=${shellSingleQuote(codexHome)}`,
+      "mkdir -p \"$CODEX_HOME\" \"$CODEX_HOME/sessions\"",
+      "DEFAULT_CODEX_HOME=\"${HOME}/.codex\"",
+      "for env_file in \"${HOME}/.config/zotero-codex-chat/env\" \"$DEFAULT_CODEX_HOME/zotero-env\" \"$CODEX_HOME/env\"; do",
+      "  if [ -r \"$env_file\" ]; then",
+      "    set -a",
+      "    . \"$env_file\"",
+      "    set +a",
+      "  fi",
+      "done",
+      "for name in auth.json config.toml AGENTS.md skills rules; do",
+      "  if [ ! -e \"$CODEX_HOME/$name\" ] && [ -e \"$DEFAULT_CODEX_HOME/$name\" ]; then",
+      "    ln -s \"$DEFAULT_CODEX_HOME/$name\" \"$CODEX_HOME/$name\" 2>/dev/null || cp -p \"$DEFAULT_CODEX_HOME/$name\" \"$CODEX_HOME/$name\" 2>/dev/null || true",
+      "  fi",
+      "done",
+      `exec ${shellSingleQuote(binaryPath)} "$@"`,
+      "",
+    ].join("\n");
+    const launcher = codexLauncherPath();
+    writeTextFile(launcher, script, 0o755);
+    return { launcher, codexHome };
   }
 
   const addon = {
@@ -1078,6 +1308,9 @@ process.on('SIGINT', () => server.close(() => process.exit(0)));
         cwd: guessWorkingDirectory(),
         configuredCwd: String(getPref("codex.cwd", "") || ""),
         extraArgs: String(getPref("codex.extraArgs", "") || ""),
+        isolateCodexSessions: getPref("codex.isolateSessions", true) !== false,
+        isolatedCodexHome: isolatedCodexHomePath(),
+        backgroundReadCacheDir: backgroundReadCacheDirPath(),
         mcpPort: Number(getPref("mcp.port", 23120) || 23120),
         mcpServerName: String(getPref("mcp.serverName", "zotero") || "zotero"),
         readerPort: Number(getPref("reader.port", 45143) || 45143),
@@ -1097,6 +1330,7 @@ process.on('SIGINT', () => server.close(() => process.exit(0)));
       if (typeof settings.model === "string") setPref("codex.model", settings.model.trim());
       if (typeof settings.cwd === "string") setPref("codex.cwd", settings.cwd.trim());
       if (typeof settings.extraArgs === "string") setPref("codex.extraArgs", settings.extraArgs.trim());
+      if (settings.isolateCodexSessions !== undefined) setPref("codex.isolateSessions", !!settings.isolateCodexSessions);
       if (settings.mcpPort !== undefined) setPref("mcp.port", Number(settings.mcpPort));
       if (typeof settings.mcpServerName === "string") setPref("mcp.serverName", settings.mcpServerName.trim() || "zotero");
       if (settings.readerPort !== undefined) setPref("reader.port", Number(settings.readerPort));
@@ -1218,6 +1452,11 @@ process.on('SIGINT', () => server.close(() => process.exit(0)));
       if (!start.ok) return start;
 
       const attachments = await this.getBackgroundReadAttachments(item);
+      try {
+        ensureDir(backgroundReadCacheDirPath());
+      } catch (e) {
+        log(`Failed to create background read cache dir: ${e}`, "error");
+      }
       return {
         ok: true,
         extractUrl: `http://127.0.0.1:${settings.readerPort}/extract`,
@@ -1225,7 +1464,11 @@ process.on('SIGINT', () => server.close(() => process.exit(0)));
         payload: {
           item: this.itemToMetadataObject(item),
           attachments,
-          maxChars: Number(options.maxChars || 45000),
+          maxChars: Number(options.maxChars || 14000),
+          maxExtractChars: Number(options.maxExtractChars || 500000),
+          forceFull: !!options.forceFull,
+          query: String(options.query || ""),
+          cacheDir: backgroundReadCacheDirPath(),
         },
       };
     },
@@ -1823,17 +2066,24 @@ process.on('SIGINT', () => server.close(() => process.exit(0)));
       }
 
       let file;
+      let launchPath = settings.binaryPath;
+      let isolatedCodexHome = "";
       try {
-        file = nsFile(settings.binaryPath);
+        if (settings.isolateCodexSessions) {
+          const launcher = prepareCodexLauncher(settings.binaryPath);
+          launchPath = launcher.launcher;
+          isolatedCodexHome = launcher.codexHome;
+        }
+        file = nsFile(launchPath);
       } catch (e) {
-        return { ok: false, message: `Invalid Codex binary path: ${e}` };
+        return { ok: false, message: `Invalid Codex launch path: ${e}` };
       }
 
       if (!file.exists()) {
-        return { ok: false, message: `Codex binary does not exist: ${settings.binaryPath}` };
+        return { ok: false, message: `Codex launch path does not exist: ${launchPath}` };
       }
       if (!file.isExecutable()) {
-        return { ok: false, message: `Codex binary is not executable: ${settings.binaryPath}` };
+        return { ok: false, message: `Codex launch path is not executable: ${launchPath}` };
       }
 
       const port = Number(settings.appServerPort || 45123);
@@ -1856,12 +2106,13 @@ process.on('SIGINT', () => server.close(() => process.exit(0)));
         });
         this.appServerProcess = process;
         this.appServerPort = port;
-        log(`started codex app-server: ${settings.binaryPath} ${args.join(" ")}`);
+        log(`started codex app-server: ${launchPath} ${args.join(" ")}`);
         return {
           ok: true,
           alreadyRunning: false,
           port,
           args,
+          isolatedCodexHome,
           message: `Started Codex app-server on ws://127.0.0.1:${port}`,
         };
       } catch (e) {
