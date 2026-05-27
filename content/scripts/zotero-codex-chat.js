@@ -94,6 +94,197 @@
 
   const BRIDGE_SCRIPT = "#!/usr/bin/env node\n/* Zotero Codex Chat WebSocket bridge.\n * Browser/XUL WebSocket clients may send an Origin header that Codex app-server rejects.\n * This bridge accepts browser WS locally and opens a Node WS client to Codex app-server.\n */\n'use strict';\n\nconst http = require('http');\nconst crypto = require('crypto');\n\nfunction argValue(name, fallback) {\n  const idx = process.argv.indexOf(name);\n  if (idx >= 0 && process.argv[idx + 1]) return process.argv[idx + 1];\n  return fallback;\n}\n\nconst listenHost = argValue('--host', '127.0.0.1');\nconst listenPort = Number(argValue('--listen', '45133'));\nconst codexHost = argValue('--codex-host', '127.0.0.1');\nconst codexPort = Number(argValue('--codex-port', '45123'));\nconst codexUrl = `ws://${codexHost}:${codexPort}`;\n\nfunction sendFrame(socket, data) {\n  if (!socket || socket.destroyed) return;\n  const payload = Buffer.from(String(data), 'utf8');\n  let header;\n  if (payload.length < 126) {\n    header = Buffer.from([0x81, payload.length]);\n  } else if (payload.length < 65536) {\n    header = Buffer.alloc(4);\n    header[0] = 0x81;\n    header[1] = 126;\n    header.writeUInt16BE(payload.length, 2);\n  } else {\n    header = Buffer.alloc(10);\n    header[0] = 0x81;\n    header[1] = 127;\n    header.writeBigUInt64BE(BigInt(payload.length), 2);\n  }\n  socket.write(Buffer.concat([header, payload]));\n}\n\nfunction closeSocket(socket, code = 1000, reason = '') {\n  if (!socket || socket.destroyed) return;\n  const reasonBuf = Buffer.from(reason, 'utf8');\n  const payload = Buffer.alloc(2 + reasonBuf.length);\n  payload.writeUInt16BE(code, 0);\n  reasonBuf.copy(payload, 2);\n  let header;\n  if (payload.length < 126) {\n    header = Buffer.from([0x88, payload.length]);\n  } else {\n    header = Buffer.from([0x88, 0]);\n  }\n  try { socket.write(Buffer.concat([header, payload])); } catch (_) {}\n  try { socket.end(); } catch (_) {}\n}\n\nfunction parseFrames(buffer) {\n  const messages = [];\n  let offset = 0;\n  while (buffer.length - offset >= 2) {\n    const b0 = buffer[offset];\n    const opcode = b0 & 0x0f;\n    const b1 = buffer[offset + 1];\n    const masked = !!(b1 & 0x80);\n    let len = b1 & 0x7f;\n    let pos = offset + 2;\n    if (len === 126) {\n      if (buffer.length - pos < 2) break;\n      len = buffer.readUInt16BE(pos);\n      pos += 2;\n    } else if (len === 127) {\n      if (buffer.length - pos < 8) break;\n      const big = buffer.readBigUInt64BE(pos);\n      if (big > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('WebSocket frame too large');\n      len = Number(big);\n      pos += 8;\n    }\n    let mask;\n    if (masked) {\n      if (buffer.length - pos < 4) break;\n      mask = buffer.subarray(pos, pos + 4);\n      pos += 4;\n    }\n    if (buffer.length - pos < len) break;\n    let payload = Buffer.from(buffer.subarray(pos, pos + len));\n    if (masked && mask) {\n      for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];\n    }\n    offset = pos + len;\n    if (opcode === 0x1) messages.push({ type: 'text', data: payload.toString('utf8') });\n    else if (opcode === 0x8) messages.push({ type: 'close' });\n    else if (opcode === 0x9) messages.push({ type: 'ping', data: payload });\n  }\n  return { messages, rest: buffer.subarray(offset) };\n}\n\nfunction sendPong(socket, payload) {\n  const body = Buffer.from(payload || Buffer.alloc(0));\n  const header = body.length < 126 ? Buffer.from([0x8a, body.length]) : Buffer.from([0x8a, 0]);\n  try { socket.write(Buffer.concat([header, body])); } catch (_) {}\n}\n\nfunction connectToCodex(clientSocket, queue) {\n  if (typeof WebSocket === 'undefined') {\n    sendFrame(clientSocket, JSON.stringify({ method: 'error', params: { error: 'Node global WebSocket is unavailable. Use Node >= 20/22.' } }));\n    closeSocket(clientSocket, 1011, 'Node WebSocket unavailable');\n    return null;\n  }\n  let codex;\n  try {\n    codex = new WebSocket(codexUrl);\n  } catch (e) {\n    sendFrame(clientSocket, JSON.stringify({ method: 'error', params: { error: `Failed to create Codex WebSocket: ${e.message || e}` } }));\n    closeSocket(clientSocket, 1011, 'Codex connection failed');\n    return null;\n  }\n\n  codex.onopen = () => {\n    for (const msg of queue.splice(0)) codex.send(msg);\n  };\n  codex.onmessage = (event) => {\n    sendFrame(clientSocket, event.data);\n  };\n  codex.onerror = () => {\n    sendFrame(clientSocket, JSON.stringify({ method: 'error', params: { error: `Codex WebSocket error while connecting to ${codexUrl}` } }));\n  };\n  codex.onclose = (event) => {\n    if (!clientSocket.destroyed) {\n      sendFrame(clientSocket, JSON.stringify({ method: 'error', params: { error: `Codex WebSocket closed: ${event.code || ''} ${event.reason || ''}` } }));\n      closeSocket(clientSocket, 1011, 'Codex closed');\n    }\n  };\n  return codex;\n}\n\nconst server = http.createServer((req, res) => {\n  if (req.url === '/readyz' || req.url === '/healthz') {\n    res.writeHead(200, { 'content-type': 'text/plain' });\n    res.end('ok\\n');\n    return;\n  }\n  res.writeHead(404, { 'content-type': 'text/plain' });\n  res.end('not found\\n');\n});\n\nserver.on('upgrade', (req, socket) => {\n  if (req.url !== '/ws') {\n    socket.write('HTTP/1.1 404 Not Found\\r\\n\\r\\n');\n    socket.destroy();\n    return;\n  }\n  const key = req.headers['sec-websocket-key'];\n  if (!key) {\n    socket.write('HTTP/1.1 400 Bad Request\\r\\n\\r\\n');\n    socket.destroy();\n    return;\n  }\n  const accept = crypto\n    .createHash('sha1')\n    .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')\n    .digest('base64');\n  socket.write(\n    'HTTP/1.1 101 Switching Protocols\\r\\n' +\n    'Upgrade: websocket\\r\\n' +\n    'Connection: Upgrade\\r\\n' +\n    `Sec-WebSocket-Accept: ${accept}\\r\\n` +\n    '\\r\\n'\n  );\n\n  const queue = [];\n  const codex = connectToCodex(socket, queue);\n  let buffer = Buffer.alloc(0);\n\n  socket.on('data', (chunk) => {\n    try {\n      buffer = Buffer.concat([buffer, chunk]);\n      const parsed = parseFrames(buffer);\n      buffer = parsed.rest;\n      for (const frame of parsed.messages) {\n        if (frame.type === 'close') {\n          try { codex?.close?.(); } catch (_) {}\n          closeSocket(socket);\n          return;\n        }\n        if (frame.type === 'ping') {\n          sendPong(socket, frame.data);\n          continue;\n        }\n        if (frame.type === 'text') {\n          if (codex && codex.readyState === WebSocket.OPEN) codex.send(frame.data);\n          else queue.push(frame.data);\n        }\n      }\n    } catch (e) {\n      sendFrame(socket, JSON.stringify({ method: 'error', params: { error: `Bridge frame error: ${e.message || e}` } }));\n      closeSocket(socket, 1011, 'Bridge error');\n    }\n  });\n\n  socket.on('close', () => { try { codex?.close?.(); } catch (_) {} });\n  socket.on('error', () => { try { codex?.close?.(); } catch (_) {} });\n});\n\nserver.listen(listenPort, listenHost, () => {\n  console.error(`[zotero-codex-bridge] listening ws://${listenHost}:${listenPort}/ws -> ${codexUrl}`);\n});\n\nprocess.on('SIGTERM', () => server.close(() => process.exit(0)));\nprocess.on('SIGINT', () => server.close(() => process.exit(0)));\n";
 
+  const BACKGROUND_READER_SCRIPT = `#!/usr/bin/env node
+'use strict';
+
+const fs = require('fs');
+const http = require('http');
+const path = require('path');
+const { execFile } = require('child_process');
+
+function argValue(name, fallback) {
+  const idx = process.argv.indexOf(name);
+  if (idx >= 0 && process.argv[idx + 1]) return process.argv[idx + 1];
+  return fallback;
+}
+
+const listenHost = argValue('--host', '127.0.0.1');
+const listenPort = Number(argValue('--listen', '45143'));
+const corsHeaders = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET,POST,OPTIONS',
+  'access-control-allow-headers': 'content-type',
+};
+
+function writeJSON(res, status, data) {
+  res.writeHead(status, { ...corsHeaders, 'content-type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(data));
+}
+
+function cleanText(text) {
+  return String(text || '').replace(/\\u0000/g, '').replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{4,}/g, '\\n\\n\\n').trim();
+}
+
+function readTextFile(filePath, maxChars) {
+  const text = cleanText(fs.readFileSync(filePath, 'utf8'));
+  return text.slice(0, maxChars);
+}
+
+function findCacheFile(filePath) {
+  const dir = path.dirname(filePath);
+  const candidates = [
+    path.join(dir, '.zotero-ft-cache'),
+    path.join(dir, '.zotero-ft-unprocessed'),
+  ];
+  return candidates.find((p) => {
+    try { return fs.existsSync(p) && fs.statSync(p).isFile(); } catch (_) { return false; }
+  }) || '';
+}
+
+function runPdftotext(filePath, maxChars) {
+  const commands = [process.env.PDFTOTEXT, '/usr/bin/pdftotext', '/usr/local/bin/pdftotext', 'pdftotext'].filter(Boolean);
+  return new Promise((resolve) => {
+    let index = 0;
+    const tryNext = () => {
+      if (index >= commands.length) {
+        resolve({ ok: false, text: '', warning: 'pdftotext was not found or failed.' });
+        return;
+      }
+      const command = commands[index++];
+      execFile(command, ['-layout', '-enc', 'UTF-8', filePath, '-'], {
+        timeout: 30000,
+        maxBuffer: Math.max(8 * 1024 * 1024, maxChars * 4),
+      }, (error, stdout, stderr) => {
+        if (error) {
+          tryNext();
+          return;
+        }
+        const text = cleanText(stdout || '');
+        resolve({ ok: !!text, text: text.slice(0, maxChars), warning: stderr ? String(stderr).slice(0, 500) : '' });
+      });
+    };
+    tryNext();
+  });
+}
+
+async function extractAttachment(attachment, maxChars) {
+  const filePath = String(attachment.path || '');
+  const source = {
+    key: attachment.key || '',
+    title: attachment.title || '',
+    path: filePath,
+    method: '',
+    chars: 0,
+    warning: '',
+  };
+  try {
+    if (!filePath || !fs.existsSync(filePath)) {
+      source.warning = 'Attachment file does not exist.';
+      return { source, text: '' };
+    }
+
+    const cache = findCacheFile(filePath);
+    if (cache) {
+      const text = readTextFile(cache, maxChars);
+      source.method = 'zotero-ft-cache';
+      source.chars = text.length;
+      source.path = cache;
+      return { source, text };
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.pdf') {
+      const result = await runPdftotext(filePath, maxChars);
+      source.method = 'pdftotext';
+      source.chars = result.text.length;
+      source.warning = result.warning || '';
+      return { source, text: result.text || '' };
+    }
+
+    if (['.txt', '.md', '.html', '.htm'].includes(ext)) {
+      const text = readTextFile(filePath, maxChars);
+      source.method = 'file';
+      source.chars = text.length;
+      return { source, text };
+    }
+
+    source.warning = 'Unsupported attachment type.';
+    return { source, text: '' };
+  } catch (e) {
+    source.warning = String(e && e.message || e);
+    return { source, text: '' };
+  }
+}
+
+function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 2 * 1024 * 1024) {
+        reject(new Error('Request body too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, corsHeaders);
+    res.end();
+    return;
+  }
+  if (req.url === '/readyz' || req.url === '/healthz') {
+    res.writeHead(200, { ...corsHeaders, 'content-type': 'text/plain' });
+    res.end('ok\\n');
+    return;
+  }
+  if (req.method !== 'POST' || req.url !== '/extract') {
+    writeJSON(res, 404, { ok: false, message: 'not found' });
+    return;
+  }
+  try {
+    const payload = JSON.parse(await readRequestBody(req) || '{}');
+    const maxChars = Math.max(1000, Math.min(Number(payload.maxChars || 45000), 120000));
+    const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 6) : [];
+    let remaining = maxChars;
+    const chunks = [];
+    const sources = [];
+
+    for (const attachment of attachments) {
+      if (remaining <= 0) break;
+      const result = await extractAttachment(attachment, remaining);
+      sources.push(result.source);
+      if (result.text) {
+        chunks.push('## Attachment: ' + (attachment.title || attachment.key || path.basename(attachment.path || 'PDF')) + '\\n' + result.text);
+        remaining -= result.text.length;
+      }
+    }
+
+    writeJSON(res, 200, {
+      ok: true,
+      item: payload.item || null,
+      text: chunks.join('\\n\\n'),
+      sources,
+      truncated: remaining <= 0,
+    });
+  } catch (e) {
+    writeJSON(res, 500, { ok: false, message: String(e && e.message || e) });
+  }
+});
+
+server.listen(listenPort, listenHost, () => {
+  console.error('[zotero-codex-background-reader] listening http://' + listenHost + ':' + listenPort);
+});
+
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+process.on('SIGINT', () => server.close(() => process.exit(0)));
+`;
+
   function pathExists(path) {
     try {
       return !!path && nsFile(path).exists();
@@ -102,8 +293,64 @@
     }
   }
 
+  function pathExecutable(path) {
+    try {
+      const file = nsFile(path);
+      return file.exists() && file.isExecutable();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function readSmallTextFile(path, maxBytes = 32768) {
+    try {
+      const file = nsFile(path);
+      if (!file.exists() || !file.isFile()) return "";
+      const fis = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(Ci.nsIFileInputStream);
+      fis.init(file, 0x01, 0, 0);
+      const sis = Cc["@mozilla.org/scriptableinputstream;1"].createInstance(Ci.nsIScriptableInputStream);
+      sis.init(fis);
+      const text = sis.read(Math.min(Number(file.fileSize || maxBytes), maxBytes));
+      sis.close();
+      fis.close();
+      return text || "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function inferNodeBinaryFromCodexPath(codexPath) {
+    const cleanPath = String(codexPath || "").trim();
+    if (!cleanPath) return "";
+
+    const siblingNode = cleanPath.replace(/\/[^/]+$/, "/node");
+    if (pathExecutable(siblingNode)) return siblingNode;
+
+    const wrapper = readSmallTextFile(cleanPath);
+    if (!wrapper) return "";
+
+    const pathMatch = wrapper.match(/PATH=["']([^"']+)["']/);
+    if (pathMatch) {
+      for (const entry of pathMatch[1].split(":")) {
+        const candidate = entry.replace(/\$HOME/g, getHomeDirPath()).replace(/^~/, getHomeDirPath()) + "/node";
+        if (pathExecutable(candidate)) return candidate;
+      }
+    }
+
+    const execMatch = wrapper.match(/exec\s+["']?([^"'\s]+\/codex)(?:["'\s]|$)/);
+    if (execMatch) {
+      const candidate = execMatch[1].replace(/\/[^/]+$/, "/node");
+      if (pathExecutable(candidate)) return candidate;
+    }
+
+    return "";
+  }
+
   function defaultNodeBinary() {
     const configured = String(getPref("codex.nodeBinaryPath", "") || "").trim();
+    const inferred = inferNodeBinaryFromCodexPath(getPref("codex.binaryPath", ""));
+    if (configured && configured !== "/usr/bin/node") return configured;
+    if (inferred) return inferred;
     if (configured) return configured;
     const common = [
       "/usr/bin/node",
@@ -134,6 +381,12 @@
     return dir + "/codex-ws-bridge.js";
   }
 
+  function backgroundReaderScriptPath() {
+    const dir = guessWorkingDirectory();
+    ensureDir(dir);
+    return dir + "/zotero-codex-background-reader.js";
+  }
+
   const addon = {
     id: ADDON_ID,
     ref: ADDON_REF,
@@ -142,6 +395,8 @@
     appServerPort: null,
     bridgeProcess: null,
     bridgePort: null,
+    backgroundReaderProcess: null,
+    backgroundReaderPort: null,
     registeredPrefPane: false,
     registeredItemPaneSectionID: null,
     mainWindows: new Set(),
@@ -175,6 +430,7 @@
         addon.mainWindows.clear();
         addon.unregisterReaderContextMenu();
         addon.unregisterItemPaneSection();
+        addon.stopBackgroundReader();
         addon.stopCodexBridge();
         addon.stopCodexAppServer();
         try {
@@ -824,6 +1080,7 @@
         extraArgs: String(getPref("codex.extraArgs", "") || ""),
         mcpPort: Number(getPref("mcp.port", 23120) || 23120),
         mcpServerName: String(getPref("mcp.serverName", "zotero") || "zotero"),
+        readerPort: Number(getPref("reader.port", 45143) || 45143),
         includeSelectionContext: !!getPref("chat.includeSelectionContext", true),
         contextMode: String(getPref("chat.contextMode", "auto") || "auto"),
         systemInstruction: String(getPref("chat.systemInstruction", "") || ""),
@@ -842,6 +1099,7 @@
       if (typeof settings.extraArgs === "string") setPref("codex.extraArgs", settings.extraArgs.trim());
       if (settings.mcpPort !== undefined) setPref("mcp.port", Number(settings.mcpPort));
       if (typeof settings.mcpServerName === "string") setPref("mcp.serverName", settings.mcpServerName.trim() || "zotero");
+      if (settings.readerPort !== undefined) setPref("reader.port", Number(settings.readerPort));
       if (settings.includeSelectionContext !== undefined) setPref("chat.includeSelectionContext", !!settings.includeSelectionContext);
       if (typeof settings.contextMode === "string") setPref("chat.contextMode", settings.contextMode || "auto");
       if (typeof settings.systemInstruction === "string") setPref("chat.systemInstruction", settings.systemInstruction);
@@ -868,6 +1126,108 @@
         log(`Failed to save chat history: ${e}`, "error");
         return false;
       }
+    },
+
+    itemToMetadataObject(item) {
+      if (!item) return null;
+      try {
+        return {
+          key: item.key || "",
+          id: item.id || null,
+          libraryID: item.libraryID || Zotero.Libraries.userLibraryID,
+          itemType: item.itemType || "",
+          title: item.getDisplayTitle?.() || item.getField?.("title") || "",
+          creators: (item.getCreators?.() || [])
+            .map((c) => [c.firstName, c.lastName || c.name].filter(Boolean).join(" "))
+            .filter(Boolean)
+            .join(", "),
+          date: item.getField?.("date") || "",
+          year: String(item.getField?.("date") || "").match(/\d{4}/)?.[0] || "",
+          publicationTitle: item.getField?.("publicationTitle") || item.getField?.("bookTitle") || "",
+          DOI: item.getField?.("DOI") || "",
+          url: item.getField?.("url") || "",
+          abstractNote: item.getField?.("abstractNote") || "",
+        };
+      } catch (e) {
+        log(`itemToMetadataObject failed: ${e}`, "error");
+        return null;
+      }
+    },
+
+    async attachmentToBackgroundReadObject(attachment) {
+      if (!attachment) return null;
+      try {
+        let filePath = "";
+        try {
+          if (attachment.getFilePathAsync) filePath = await attachment.getFilePathAsync();
+        } catch (_) {}
+        try {
+          if (!filePath && attachment.getFilePath) filePath = attachment.getFilePath();
+        } catch (_) {}
+        if (!filePath) return null;
+        const contentType = String(attachment.attachmentContentType || attachment.getField?.("contentType") || "");
+        const title = attachment.getDisplayTitle?.() || attachment.getField?.("title") || attachment.key || "Attachment";
+        return {
+          id: attachment.id || null,
+          key: attachment.key || "",
+          title,
+          path: filePath,
+          contentType,
+        };
+      } catch (e) {
+        log(`attachmentToBackgroundReadObject failed: ${e}`, "error");
+        return null;
+      }
+    },
+
+    async getBackgroundReadAttachments(item) {
+      const attachments = [];
+      const pushAttachment = async (candidate) => {
+        if (!candidate) return;
+        const data = await this.attachmentToBackgroundReadObject(candidate);
+        if (!data?.path) return;
+        const lower = `${data.path} ${data.contentType}`.toLowerCase();
+        if (!lower.includes(".pdf") && !lower.includes("application/pdf") && !/\.(txt|md|html?)\b/.test(lower)) return;
+        if (!attachments.some((existing) => existing.path === data.path)) attachments.push(data);
+      };
+
+      try {
+        if (item?.isAttachment?.()) {
+          await pushAttachment(item);
+          return attachments;
+        }
+
+        const ids = item?.getAttachments?.() || [];
+        for (const id of ids.slice(0, 10)) {
+          try {
+            await pushAttachment(Zotero.Items.get(id));
+          } catch (_) {}
+        }
+      } catch (e) {
+        log(`getBackgroundReadAttachments failed: ${e}`, "error");
+      }
+      return attachments;
+    },
+
+    async prepareBackgroundRead(hint, options = {}) {
+      const item = this.resolvePrimaryNoteTargetItem(hint) || this.resolveTopLevelBibliographicItem(this.getSelectedZoteroItem());
+      if (!item) return { ok: false, message: "请先在 Zotero 中选中一篇文献或打开一个 PDF。" };
+
+      const settings = this.getSettings();
+      const start = this.startBackgroundReader();
+      if (!start.ok) return start;
+
+      const attachments = await this.getBackgroundReadAttachments(item);
+      return {
+        ok: true,
+        extractUrl: `http://127.0.0.1:${settings.readerPort}/extract`,
+        readyUrl: `http://127.0.0.1:${settings.readerPort}/readyz`,
+        payload: {
+          item: this.itemToMetadataObject(item),
+          attachments,
+          maxChars: Number(options.maxChars || 45000),
+        },
+      };
     },
 
     buildCodexMCPToml() {
@@ -1305,6 +1665,73 @@
     getClientWebSocketURL() {
       const s = this.getSettings();
       return `ws://127.0.0.1:${s.bridgePort || 45133}/ws`;
+    },
+
+    isBackgroundReaderRunning() {
+      return !!this.backgroundReaderProcess && this.backgroundReaderProcess.isRunning;
+    },
+
+    startBackgroundReader() {
+      const settings = this.getSettings();
+      if (this.isBackgroundReaderRunning()) {
+        return {
+          ok: true,
+          alreadyRunning: true,
+          port: this.backgroundReaderPort || settings.readerPort,
+          message: "Background reader is already running.",
+        };
+      }
+
+      const nodePath = settings.nodeBinaryPath;
+      let nodeFile;
+      try {
+        nodeFile = nsFile(nodePath);
+      } catch (e) {
+        return { ok: false, message: `Invalid Node binary path: ${e}` };
+      }
+      if (!nodeFile.exists()) return { ok: false, message: `Node binary does not exist: ${nodePath}` };
+      if (!nodeFile.isExecutable()) return { ok: false, message: `Node binary is not executable: ${nodePath}` };
+
+      let scriptPath;
+      try {
+        scriptPath = backgroundReaderScriptPath();
+        writeTextFile(scriptPath, BACKGROUND_READER_SCRIPT, 0o755);
+      } catch (e) {
+        return { ok: false, message: `Failed to write background reader script: ${e}` };
+      }
+
+      const port = Number(settings.readerPort || 45143);
+      const args = [scriptPath, "--listen", String(port)];
+      try {
+        const process = Cc["@mozilla.org/process/util;1"].createInstance(Ci.nsIProcess);
+        process.init(nodeFile);
+        process.runAsync(args, args.length, {
+          observe: (subject, topic, data) => {
+            log(`Background reader process event: ${topic} ${data || ""}`);
+            if (topic === "process-finished" || topic === "process-failed") {
+              if (addon.backgroundReaderProcess === process) addon.backgroundReaderProcess = null;
+            }
+          },
+        });
+        this.backgroundReaderProcess = process;
+        this.backgroundReaderPort = port;
+        return { ok: true, alreadyRunning: false, port, args, message: `Started background reader on http://127.0.0.1:${port}` };
+      } catch (e) {
+        log(`startBackgroundReader failed: ${e}`, "error");
+        return { ok: false, message: String(e) };
+      }
+    },
+
+    stopBackgroundReader() {
+      if (!this.backgroundReaderProcess) return { ok: true, message: "Background reader is not running." };
+      try {
+        if (this.backgroundReaderProcess.isRunning) this.backgroundReaderProcess.kill();
+        this.backgroundReaderProcess = null;
+        return { ok: true, message: "Background reader stopped." };
+      } catch (e) {
+        log(`stopBackgroundReader failed: ${e}`, "error");
+        return { ok: false, message: String(e) };
+      }
     },
 
     isCodexBridgeRunning() {

@@ -11,6 +11,7 @@
   let currentTurnId = null;
   let activeAssistantMessage = null;
   let initialized = false;
+  let currentUserPromptText = "";
   let toolCallRows = new Map();
   let toolStats = { running: 0, done: 0, error: 0 };
   let lastAssistantText = "";
@@ -176,6 +177,33 @@
     return item;
   }
 
+  function forgetThreadId(badThreadId) {
+    if (badThreadId && threadId === badThreadId) threadId = null;
+    else if (!badThreadId) threadId = null;
+    currentTurnId = null;
+    activeAssistantMessage = null;
+    updateActiveConversation((item) => {
+      item.threadId = null;
+      if (badThreadId) item.invalidThreadId = badThreadId;
+    });
+    if (!badThreadId) return;
+    const history = loadHistory();
+    let changed = false;
+    for (const item of history) {
+      if (item?.threadId === badThreadId) {
+        item.threadId = null;
+        item.invalidThreadId = badThreadId;
+        changed = true;
+      }
+    }
+    if (changed) saveHistory(history);
+  }
+
+  function isThreadNotFoundError(error) {
+    const text = String(error?.message || error || "");
+    return /\bthread not found\b/i.test(text);
+  }
+
   function getActiveConversation() {
     if (!activeConversationId) return null;
     return loadHistory().find((item) => item.id === activeConversationId) || null;
@@ -329,6 +357,7 @@
     $("nodeBinaryPath").value = settings.nodeBinaryPath || "";
     $("appServerPort").value = settings.appServerPort || 45123;
     $("bridgePort").value = settings.bridgePort || 45133;
+    $("readerPort").value = settings.readerPort || 45143;
     $("mcpPort").value = settings.mcpPort || 23120;
     $("mcpServerName").value = settings.mcpServerName || "zotero";
     $("model").value = settings.model || "";
@@ -347,6 +376,7 @@
       nodeBinaryPath: $("nodeBinaryPath").value,
       appServerPort: Number($("appServerPort").value),
       bridgePort: Number($("bridgePort").value),
+      readerPort: Number($("readerPort").value),
       mcpPort: Number($("mcpPort").value),
       mcpServerName: $("mcpServerName").value,
       model: $("model").value,
@@ -492,7 +522,7 @@
       clientInfo: {
         name: "zotero_codex_chat",
         title: "Zotero Codex Chat",
-        version: "0.1.3",
+        version: "0.1.4",
       },
       capabilities: {
         experimentalApi: true,
@@ -700,6 +730,28 @@
       /\b(search_library|get_item_details|get_content|get_annotations|search_annotations|get_collections|semantic_search|find_similar)\b/.test(lower);
   }
 
+  function isHeavyReadToolName(name, params) {
+    const lower = `${name || ""} ${safeJson(params || {})}`.toLowerCase();
+    return /\b(get_content|search_fulltext|fulltext_database|get_annotations|search_annotations|semantic_search)\b/.test(lower) ||
+      /\b(fulltext|pdf|attachment|annotation|annotations|complete)\b/.test(lower);
+  }
+
+  function isSafeMetadataReadToolName(name, params) {
+    const lower = `${name || ""} ${safeJson(params || {})}`.toLowerCase();
+    return /\b(search_library|get_item_details|get_collections|get_collection_items|get_collection_details|get_subcollections|get_item_abstract)\b/.test(lower) ||
+      /\b(title|creator|author|date|year|doi|url|publicationtitle|itemtype|metadata)\b/.test(lower);
+  }
+
+  function isMainThreadFullTextToolName(name, params) {
+    const lower = `${name || ""} ${safeJson(params || {})}`.toLowerCase();
+    return /\b(get_content|search_fulltext|fulltext_database)\b/.test(lower) ||
+      /\b(fulltext|pdf)\b/.test(lower);
+  }
+
+  function currentPromptAllowsHeavyRead() {
+    return /批注|注释|全库|mcp|搜索库|search|annotation/i.test(currentUserPromptText || "");
+  }
+
   function acceptServerRequest(msg, result) {
     sendRaw({ id: msg.id, result: result || { action: "accept", content: {} } });
   }
@@ -711,6 +763,18 @@
 
   function confirmReadMCP(method, params) {
     const toolName = extractToolNameFromParams(params) || "unknown tool";
+    if (isMainThreadFullTextToolName(toolName, params)) {
+      showToast(`已拦截 Zotero 主线程全文读取：${toolName}`);
+      return false;
+    }
+    if (isHeavyReadToolName(toolName, params) && !currentPromptAllowsHeavyRead()) {
+      showToast(`已拦截可能卡住 Zotero 的读取：${toolName}`);
+      return false;
+    }
+    if (isSafeMetadataReadToolName(toolName, params)) {
+      showToast(`已自动允许 Zotero 元数据读取：${toolName}`);
+      return true;
+    }
     return window.confirm(
       `Codex 想调用 Zotero MCP 只读工具。\n\n工具：${toolName}\n\n` +
       `注意：全文读取、批注读取、全库搜索可能会让 Zotero 暂时卡住。\n\n${approvalPreview(method, params)}\n\n允许这一次吗？`
@@ -955,6 +1019,12 @@
       return;
     }
     if (method === "error") {
+      if (isThreadNotFoundError(params.error || params)) {
+        forgetThreadId(threadId);
+        addMessage("error", "当前 Codex thread 已失效。下一条消息会自动新建 thread，并带上本地历史继续。", "error");
+        setBusy(false);
+        return;
+      }
       addMessage("error", safeJson(params.error || params), "error");
       return;
     }
@@ -1049,7 +1119,86 @@
     return lines.join("\n\n");
   }
 
-  function buildPrompt(userText) {
+  function formatBackgroundReadContext(job, result) {
+    const item = result?.item || job?.payload?.item || {};
+    const lines = [];
+    lines.push("This PDF text was extracted by Zotero Codex Chat's external background reader process. It did not run through Zotero MCP and should be preferred over calling Zotero MCP full-text tools.");
+    if (item.title) lines.push(`Title: ${item.title}`);
+    if (item.creators) lines.push(`Creators: ${item.creators}`);
+    if (item.date || item.year) lines.push(`Date: ${item.date || item.year}`);
+    if (item.publicationTitle) lines.push(`Publication: ${item.publicationTitle}`);
+    if (item.DOI) lines.push(`DOI: ${item.DOI}`);
+    if (item.url) lines.push(`URL: ${item.url}`);
+    if (item.abstractNote) lines.push(`Abstract:\n${item.abstractNote}`);
+
+    const sources = Array.isArray(result?.sources) ? result.sources : [];
+    if (sources.length) {
+      lines.push("Background reader sources:");
+      for (const source of sources) {
+        const bits = [
+          source.title || source.key || "attachment",
+          source.method ? `method=${source.method}` : "",
+          source.chars !== undefined ? `chars=${source.chars}` : "",
+          source.warning ? `warning=${source.warning}` : "",
+        ].filter(Boolean);
+        lines.push(`- ${bits.join(" | ")}`);
+      }
+    }
+
+    const text = String(result?.text || "").trim();
+    if (text) {
+      lines.push(`Extracted PDF/full-text content:\n${text}`);
+    } else {
+      lines.push("No PDF full text was extracted. Use the metadata and visible Zotero context only; do not call Zotero MCP full-text tools unless the user asks again.");
+    }
+    return lines.join("\n\n");
+  }
+
+  async function waitForBackgroundReaderReady(url, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(url, { method: "GET", cache: "no-store" });
+        if (res.ok) return true;
+      } catch (_) {}
+      await new Promise((resolve) => setTimeout(resolve, 180));
+    }
+    return false;
+  }
+
+  async function fetchWithTimeout(url, options = {}, timeoutMs = 35000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function readBackgroundContextForPrompt() {
+    const job = await getAddon().prepareBackgroundRead?.(getFrameTargetHint(), { maxChars: 45000 });
+    if (!job?.ok) throw new Error(job?.message || "Background reader could not prepare the current Zotero item.");
+    const ready = await waitForBackgroundReaderReady(job.readyUrl);
+    if (!ready) throw new Error(`Background reader did not become ready at ${job.readyUrl}.`);
+    const attachments = Array.isArray(job.payload?.attachments) ? job.payload.attachments : [];
+    if (!attachments.length) throw new Error("当前条目没有可后台读取的 PDF/TXT/HTML 附件。");
+    const res = await fetchWithTimeout(job.extractUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(job.payload || {}),
+    }, 38000);
+    const result = await res.json();
+    if (!res.ok || !result?.ok) throw new Error(result?.message || `${res.status} ${res.statusText}`);
+    return formatBackgroundReadContext(job, result);
+  }
+
+  function shouldUseBackgroundRead(text, options) {
+    if (options?.backgroundRead) return true;
+    return /深度读取|读取全文|全文读取|PDF全文|pdf全文|读PDF|读取PDF|PDF首页|pdf首页|附件全文|摘要|总结|概括|概述|当前文献|这篇文献|这篇论文|阅读笔记/i.test(text || "");
+  }
+
+  function buildPrompt(userText, backgroundContext) {
     settings = getAddon().getSettings();
     const parts = [];
     if (settings.systemInstruction) {
@@ -1059,11 +1208,14 @@
     if (localHistory) {
       parts.push(`[Local chat history loaded from this Zotero Codex Chat panel]\nContinue the conversation using this visible local transcript as context. It may be the only available history if the Codex service or bridge was restarted.\n\n${localHistory}`);
     }
+    if (backgroundContext) {
+      parts.push(`[Background PDF text]\n${backgroundContext}`);
+    }
     const ctx = getAddon().formatContextForPrompt(currentContextMode());
     if (ctx) {
       parts.push(`[Zotero context]\n${ctx}`);
-      parts.push(`[MCP safety]\nThe Zotero MCP server may be available as '${settings.mcpServerName || "zotero"}', but MCP calls run inside Zotero and can freeze the UI. Use the provided context first. Do not call Zotero MCP tools unless the user explicitly asks for library/PDF/annotation lookup, and expect a confirmation prompt before each MCP call.`);
     }
+    parts.push(`[MCP safety]\nThe Zotero MCP server may be available as '${settings.mcpServerName || "zotero"}', but MCP calls run inside Zotero and can freeze the UI. Use the provided Zotero context and background PDF text first. Light metadata tools such as search_library, get_item_details, get_item_abstract, and collection/item listing are OK when they help with title, DOI, URL, authors, dates, or attachment clues. Do not call get_content, search_fulltext, fulltext_database, get_annotations, search_annotations, semantic_search, or other PDF/full-text/annotation tools unless the user explicitly asks for annotations, library search, or MCP. For full-text reading, prefer the provided background reader content and do not use Zotero MCP full-text tools.`);
     parts.push(`[User request]\n${userText}`);
     return parts.join("\n\n");
   }
@@ -1094,20 +1246,39 @@
 
   window.ZoteroCodexChatFrameAPI = { receiveExternalPrompt };
 
-  async function submitPromptText(text, displayText) {
+  async function submitPromptText(text, displayText, options = {}) {
     const clean = String(text || "").trim();
     if (!clean) return;
     ensureActiveConversation(displayText || clean);
     addMessage("user", displayText || clean, "user", { historyContent: clean });
     $("promptInput").value = "";
     setBusy(true);
+    currentUserPromptText = clean;
     try {
+      let backgroundContext = "";
+      if (shouldUseBackgroundRead(clean, options)) {
+        showToast("后台读取当前 PDF，不占用 Zotero 浏览");
+        try {
+          backgroundContext = await readBackgroundContextForPrompt();
+          showToast("后台 PDF 读取完成");
+        } catch (readError) {
+          const message = String(readError?.message || readError);
+          addMessage("assistant", `后台 PDF 读取没有正常返回，将改用当前 Zotero 上下文继续：${message}`, "assistant");
+          backgroundContext = `Background PDF reader did not return usable text: ${message}\nAnswer from Zotero metadata/current visible context only. Do not call Zotero MCP full-text tools.`;
+        }
+      }
       await ensureCodexReady();
       const id = await ensureThread();
-      await request("turn/start", {
-        threadId: id,
-        input: [{ type: "text", text: buildPrompt(clean) }],
-      });
+      const input = [{ type: "text", text: buildPrompt(clean, backgroundContext) }];
+      try {
+        await request("turn/start", { threadId: id, input });
+      } catch (turnError) {
+        if (!isThreadNotFoundError(turnError)) throw turnError;
+        forgetThreadId(id);
+        showToast("旧 Codex thread 已失效，正在自动新建并续上本地历史");
+        const freshId = await ensureThread();
+        await request("turn/start", { threadId: freshId, input });
+      }
     } catch (e) {
       addMessage("error", String(e.message || e), "error");
       setBusy(false);
@@ -1123,24 +1294,26 @@
     const templates = {
       summarize: {
         label: "总结当前文献",
-        prompt: "请调用 Zotero MCP，读取当前选中的文献条目、摘要、PDF/附件全文和批注，然后用中文总结：\n1. 研究问题\n2. 方法与数据\n3. 主要贡献\n4. 局限性\n5. 值得放进相关工作的观点\n要求：优先使用当前选中文献的 key；不要写入 Zotero；如果没有选中文献，请先说明需要我选中文献。",
+        prompt: "不要调用 Zotero MCP，不要读取批注或全库。请优先根据插件提供的后台 PDF 文本、摘要和当前 Zotero 上下文，用中文总结当前文献：\n1. 研究问题\n2. 方法与数据\n3. 主要贡献\n4. 局限性\n5. 值得放进相关工作的观点\n如果后台文本不足，请明确说明缺了什么。",
+        backgroundRead: true,
       },
       search: {
         label: "搜索全库相关文献",
-        prompt: "请根据当前 Zotero 上下文，调用 Zotero MCP 在我的 Zotero 文献库中搜索相关文献。\n要求：\n1. 如果当前选中了文献，请围绕它的主题、标题、摘要关键词搜索；\n2. 如果当前选中了 collection，请围绕该 collection 的主题搜索；\n3. 列出最相关的 10 条，包括标题、作者/年份、为什么相关；\n4. 不要写入 Zotero。",
+        prompt: "请根据当前 Zotero 上下文，调用 Zotero MCP 做轻量级文献库搜索。只允许使用 search_library / get_item_details 这类轻量元数据工具；不要读取 PDF 全文、附件、批注，也不要调用 search_fulltext、get_content、get_annotations 或 semantic_search。\n要求：\n1. 如果当前选中了文献，请围绕它的标题、作者、年份、上下文关键词搜索；\n2. 如果当前选中了 collection，请围绕该 collection 的主题搜索；\n3. limit 控制在 8 条以内；\n4. 列出标题、作者/年份、为什么相关；\n5. 不要写入 Zotero。",
       },
       note: {
         label: "生成阅读笔记",
-        prompt: "请调用 Zotero MCP 读取当前选中文献的元数据、摘要、PDF/附件全文和批注，生成一份中文 Markdown 阅读笔记。\n结构固定为：\n# 中文阅读笔记\n## 基本信息\n## 一句话概括\n## 研究问题\n## 方法\n## 主要贡献\n## 关键证据\n## 局限性\n## 可引用观点\n## 和我的研究/项目的关系\n要求：只输出笔记内容；不要写入 Zotero。",
+        prompt: "不要调用 Zotero MCP，不要读取批注或全库。请优先根据插件提供的后台 PDF 文本、摘要和当前 Zotero 上下文，生成一份中文 Markdown 阅读笔记。\n结构固定为：\n# 中文阅读笔记\n## 基本信息\n## 一句话概括\n## 研究问题\n## 方法\n## 主要贡献\n## 关键证据\n## 局限性\n## 可引用观点\n## 和我的研究/项目的关系\n如果后台文本不足，请在对应小节写“当前上下文不足”。",
+        backgroundRead: true,
       },
       annotations: {
         label: "总结批注",
-        prompt: "请调用 Zotero MCP 读取当前选中文献或其 PDF 附件的 annotations / notes，并用中文整理：\n1. 批注主题分组\n2. 每组关键观点\n3. 可能对应的论文段落/页码信息\n4. 适合写入阅读笔记的摘要\n要求：不要写入 Zotero；如果当前条目没有批注，请说明没有读取到批注。",
+        prompt: "请先根据当前插件已经提供的上下文判断是否已有批注/选中文本信息。只有当用户当前明确需要“批注”时，才调用 Zotero MCP 读取当前选中文献的 annotations，且不要读取 PDF 全文、附件或全库。\n用中文整理：\n1. 批注主题分组\n2. 每组关键观点\n3. 可能对应的论文段落/页码信息\n4. 适合写入阅读笔记的摘要\n要求：不要写入 Zotero；如果没有读取到批注，请说明没有读取到批注。",
       },
     };
     const item = templates[kind];
     if (!item) return;
-    submitPromptText(item.prompt, item.label);
+    submitPromptText(item.prompt, item.label, { backgroundRead: !!item.backgroundRead });
   }
 
 
@@ -1232,6 +1405,8 @@
     ws = null;
     initialized = false;
     pending.clear();
+    const readerResult = getAddon().stopBackgroundReader ? getAddon().stopBackgroundReader() : { ok: true, message: "" };
+    if (readerResult.message && !readerResult.ok) addMessage("error", readerResult.message, "error");
     const bridgeResult = getAddon().stopCodexBridge ? getAddon().stopCodexBridge() : { ok: true, message: "" };
     if (bridgeResult.message && !bridgeResult.ok) addMessage("error", bridgeResult.message, "error");
     const result = getAddon().stopCodexAppServer();

@@ -11,5 +11,6 @@ pref("extensions.zotero.zotero-codex-chat.chat.includeSelectionContext", true);
 pref("extensions.zotero.zotero-codex-chat.chat.systemInstruction", "你在 Zotero 里辅助用户阅读、检索和整理文献。优先使用 Zotero MCP 工具读取文献、PDF、注释和笔记。除非用户明确要求，不要写入 Zotero。读取类 MCP 工具可以正常使用；涉及写入、修改、删除 Zotero 内容时，必须等待用户确认。");
 pref("extensions.zotero.zotero-codex-chat.chat.contextMode", "auto");
 pref("extensions.zotero.zotero-codex-chat.chat.history", "");
+pref("extensions.zotero.zotero-codex-chat.reader.port", 45143);
 pref("extensions.zotero.zotero-codex-chat.ui.sidebarVisible", false);
 pref("extensions.zotero.zotero-codex-chat.ui.sidebarWidth", 360);
