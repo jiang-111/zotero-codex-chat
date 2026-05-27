@@ -147,6 +147,7 @@
     mainWindows: new Set(),
     registeredReaderListenerIDs: [],
     pendingExternalPrompts: [],
+    hiddenSidebarPromptCount: 0,
     externalPromptDeliveryTimer: null,
     lastReaderPromptTarget: null,
 
@@ -377,6 +378,12 @@
     deliverPromptToChat(prompt, displayText) {
       const payload = { prompt, displayText, ts: Date.now() };
       this.pendingExternalPrompts.push(payload);
+      for (const win of this.mainWindows) {
+        try {
+          this.addSidebar(win);
+          this.updateSidebarHandle(win.document);
+        } catch (_) {}
+      }
       this.scheduleExternalPromptDelivery();
       return true;
     },
@@ -393,8 +400,8 @@
       if (!this.pendingExternalPrompts.length) return false;
       let delivered = false;
       for (const win of this.mainWindows) {
-        try { this.showSidebar(win); } catch (_) {}
-        const ids = [SIDEBAR_IFRAME_ID, ITEM_PANE_IFRAME_ID];
+        try { this.addSidebar(win); } catch (_) {}
+        const ids = [ITEM_PANE_IFRAME_ID, SIDEBAR_IFRAME_ID];
         for (const id of ids) {
           try {
             const frame = win.document?.getElementById?.(id);
@@ -402,7 +409,12 @@
             if (api?.receiveExternalPrompt) {
               const queued = this.pendingExternalPrompts.splice(0);
               for (const payload of queued) api.receiveExternalPrompt(payload);
+              const sidebar = win.document?.getElementById?.(SIDEBAR_ID);
+              if (id === SIDEBAR_IFRAME_ID && sidebar?.style?.display === "none") {
+                this.hiddenSidebarPromptCount += queued.length;
+              }
               delivered = true;
+              this.updateSidebarHandle(win.document);
               break;
             }
           } catch (_) {}
@@ -410,6 +422,19 @@
         if (delivered) break;
       }
       return delivered;
+    },
+
+    updateSidebarHandle(doc) {
+      const handle = doc?.querySelector?.(".zcc-sidebar-handle");
+      if (!handle) return;
+      const count = this.pendingExternalPrompts.length + this.hiddenSidebarPromptCount;
+      handle.textContent = count ? `Codex (${count})` : "Codex";
+      handle.setAttribute(
+        "title",
+        count
+          ? `${count} queued Codex prompt${count > 1 ? "s" : ""}. Click to open.`
+          : "Open Codex Chat Sidebar"
+      );
     },
 
     drainExternalPrompts() {
@@ -582,7 +607,13 @@
       const sidebar = doc.createElementNS(htmlNS, "div");
       sidebar.setAttribute("id", SIDEBAR_ID);
       sidebar.setAttribute("class", "zcc-sidebar");
-      sidebar.style.display = getPref("ui.sidebarVisible", true) ? "flex" : "none";
+      sidebar.style.display = "none";
+      sidebar.style.width = `${this.clampSidebarWidth(window, Number(getPref("ui.sidebarWidth", 360) || 360))}px`;
+
+      const resizer = doc.createElementNS(htmlNS, "div");
+      resizer.setAttribute("class", "zcc-sidebar-resizer");
+      resizer.setAttribute("title", "Drag to resize Codex sidebar");
+      resizer.addEventListener("mousedown", (event) => this.startSidebarResize(window, event));
 
       const header = doc.createElementNS(htmlNS, "div");
       header.setAttribute("class", "zcc-sidebar-header");
@@ -611,6 +642,7 @@
       frame.setAttribute("id", SIDEBAR_IFRAME_ID);
       frame.setAttribute("class", "zcc-sidebar-frame");
       frame.setAttribute("src", "chrome://zotero-codex-chat/content/chat.xhtml?sidebar=1");
+      frame.addEventListener("load", () => this.scheduleExternalPromptDelivery());
 
       const handle = doc.createElementNS(htmlNS, "button");
       handle.setAttribute("type", "button");
@@ -619,9 +651,36 @@
       handle.addEventListener("click", () => addon.showSidebar(window));
       handle.style.display = sidebar.style.display === "none" ? "block" : "none";
 
-      sidebar.append(header, frame);
+      sidebar.append(resizer, header, frame);
       host.appendChild(sidebar);
       host.appendChild(handle);
+      this.updateSidebarHandle(doc);
+    },
+
+    clampSidebarWidth(window, width) {
+      const viewportWidth = Number(window?.innerWidth || 1280);
+      const maxWidth = Math.max(320, Math.min(680, Math.floor(viewportWidth * 0.55)));
+      return Math.max(280, Math.min(maxWidth, Number(width) || 360));
+    },
+
+    startSidebarResize(window, event) {
+      event.preventDefault();
+      const doc = window.document;
+      const sidebar = doc.getElementById(SIDEBAR_ID);
+      if (!sidebar) return;
+      const onMove = (moveEvent) => {
+        const nextWidth = this.clampSidebarWidth(window, window.innerWidth - moveEvent.clientX);
+        sidebar.style.width = `${nextWidth}px`;
+        setPref("ui.sidebarWidth", nextWidth);
+      };
+      const onUp = () => {
+        doc.removeEventListener("mousemove", onMove, true);
+        doc.removeEventListener("mouseup", onUp, true);
+        doc.documentElement?.classList?.remove?.("zcc-resizing-sidebar");
+      };
+      doc.documentElement?.classList?.add?.("zcc-resizing-sidebar");
+      doc.addEventListener("mousemove", onMove, true);
+      doc.addEventListener("mouseup", onUp, true);
     },
 
     ensureSidebarStyle(doc) {
@@ -642,6 +701,18 @@
           border-left: 1px solid rgba(0,0,0,.18);
           box-shadow: -8px 0 24px rgba(0,0,0,.16);
           z-index: 2147483000;
+        }
+        #${SIDEBAR_ID} .zcc-sidebar-resizer {
+          position: absolute;
+          left: -5px;
+          top: 0;
+          width: 10px;
+          height: 100%;
+          cursor: col-resize;
+          z-index: 1;
+        }
+        #${SIDEBAR_ID} .zcc-sidebar-resizer:hover {
+          background: rgba(37, 99, 235, .16);
         }
         #${SIDEBAR_ID} .zcc-sidebar-header {
           height: 34px;
@@ -682,6 +753,10 @@
           border-radius: 8px 0 0 8px;
           box-shadow: -4px 0 12px rgba(0,0,0,.12);
         }
+        .zcc-resizing-sidebar, .zcc-resizing-sidebar * {
+          cursor: col-resize !important;
+          user-select: none !important;
+        }
         @media (prefers-color-scheme: dark) {
           #${SIDEBAR_ID}.zcc-sidebar { background: #202124; border-left-color: rgba(255,255,255,.18); }
           #${SIDEBAR_ID} .zcc-sidebar-header { background: #25272b; border-bottom-color: rgba(255,255,255,.14); color: #f1f3f4; }
@@ -699,7 +774,9 @@
       const handle = doc.querySelector(".zcc-sidebar-handle");
       if (sidebar) sidebar.style.display = "flex";
       if (handle) handle.style.display = "none";
+      this.hiddenSidebarPromptCount = 0;
       setPref("ui.sidebarVisible", true);
+      this.scheduleExternalPromptDelivery();
     },
 
     hideSidebar(window) {
@@ -709,6 +786,7 @@
       if (sidebar) sidebar.style.display = "none";
       if (handle) handle.style.display = "block";
       setPref("ui.sidebarVisible", false);
+      this.updateSidebarHandle(doc);
     },
 
     toggleSidebar(window) {
